@@ -4,6 +4,16 @@ Geri uploads binary files to NNTP servers, writes NZBs, and can check article
 propagation and repair missing articles. It supports yEnc (the default),
 UUEncode, and Base64.
 
+## Screenshots
+
+Posting files:
+
+![Geri TUI showing posting activity and upload progress](docs/screenshots/posting.png)
+
+Checking article propagation:
+
+![Geri TUI showing propagation checking after posting completes](docs/screenshots/checking.png)
+
 ## Basic usage
 
 The examples use placeholder server names. Replace them with your servers
@@ -27,7 +37,7 @@ Post files to server A and write an NZB:
 geri upload \
   --host news-a.example.invalid --tls implicit \
   --from 'Uploader <uploader@example.invalid>' \
-  --group alt.binaries.cleannews.test \
+  --group alt.binaries.test \
   --part-size 700K --connections 8 \
   --nzb upload.nzb --no-tui -- ./*.bin
 ```
@@ -43,7 +53,7 @@ geri upload \
   --host news-a.example.invalid --tls implicit \
   --check-host news-b.example.invalid --check-tls implicit \
   --from 'Uploader <uploader@example.invalid>' \
-  --group alt.binaries.cleannews.test \
+  --group alt.binaries.test \
   --part-size 700K --connections 8 \
   --check-connections 2 --repair-connections 2 \
   --nzb upload-abb.nzb --no-tui -- ./*.bin
@@ -60,7 +70,7 @@ geri upload \
   --check-host news-b.example.invalid --check-tls implicit \
   --repair-host news-c.example.invalid --repair-tls implicit \
   --from 'Uploader <uploader@example.invalid>' \
-  --group alt.binaries.cleannews.test \
+  --group alt.binaries.test \
   --part-size 700K --connections 8 \
   --check-connections 2 --repair-connections 2 \
   --nzb upload-abc.nzb --no-tui -- ./*.bin

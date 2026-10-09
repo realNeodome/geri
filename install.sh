@@ -58,7 +58,7 @@ chmod 755 "$stage/release/geri.sh"
 mkdir -p "$stage/release/docs"
 cp "$SOURCE/README.md" "$stage/release/README.md"
 cp "$SOURCE/LICENSE" "$stage/release/LICENSE"
-cp "$SOURCE/docs/"*.md "$stage/release/docs/"
+cp -R "$SOURCE/docs/." "$stage/release/docs/"
 printf '%s\n' 'Installed by Geri install.sh' > "$stage/release/.geri-install"
 if [ -d "$destination" ]; then mv "$destination" "$stage/previous"; fi
 mv "$stage/release" "$destination"
