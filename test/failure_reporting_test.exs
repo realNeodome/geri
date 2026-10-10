@@ -114,6 +114,31 @@ defmodule Geri.FailureReportingTest do
     end
   end
 
+  test "a rejected STARTTLS greeting closes the TCP connection" do
+    {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, packet: :line, ip: {127, 0, 0, 1}])
+    server =
+      Task.async(fn ->
+        {:ok, socket} = :gen_tcp.accept(listener, 5_000)
+        :ok = :gen_tcp.send(socket, "500 posting not allowed\r\n")
+        result = :gen_tcp.recv(socket, 0, 5_000)
+        :gen_tcp.close(socket)
+        result
+      end)
+    {:ok, {_address, port}} = :inet.sockname(listener)
+
+    try do
+      assert {:error, {:unexpected_greeting, 500, "posting not allowed"}} =
+               Geri.NNTP.connect(host: "127.0.0.1", port: port, tls: :starttls)
+
+      # The client must close its socket, so the server sees EOF rather than
+      # waiting out its receive timeout.
+      assert {:error, :closed} = Task.await(server, 6_000)
+    after
+      :gen_tcp.close(listener)
+      if Process.alive?(server.pid), do: Task.shutdown(server, :brutal_kill)
+    end
+  end
+
   test "core upload returns posting failure with the upload key", c do
     {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
     {:ok, {_address, port}} = :inet.sockname(listener)

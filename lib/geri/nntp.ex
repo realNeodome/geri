@@ -202,8 +202,7 @@ defmodule Geri.NNTP do
 
   defp connect_starttls(host, port, opts) do
     with {:ok, conn} <- open_tcp(host, port),
-         {:ok, code, message} <- recv_response(conn),
-         :ok <- accept_greeting(code, message),
+         {:ok, conn} <- read_greeting(conn),
          {:ok, conn} <- starttls(conn, host, opts) do
       case maybe_mode_reader(conn, opts) do
         :ok ->
@@ -215,8 +214,25 @@ defmodule Geri.NNTP do
           close(conn)
           error
       end
-    else
+    end
+  end
+
+  # The greeting arrives on the raw TCP socket; close it here on failure so a
+  # rejected or unresponsive server does not leak the connection.
+  defp read_greeting(conn) do
+    case recv_response(conn) do
+      {:ok, code, message} ->
+        case accept_greeting(code, message) do
+          :ok ->
+            {:ok, conn}
+
+          {:error, _reason} = error ->
+            close(conn)
+            error
+        end
+
       {:error, _reason} = error ->
+        close(conn)
         error
     end
   end
