@@ -14,6 +14,56 @@ Checking article propagation:
 
 ![Geri TUI showing propagation checking after posting completes](docs/screenshots/checking.png)
 
+## Installation
+
+Geri requires Elixir 1.20 and a compatible Erlang/OTP installation. On
+macOS (OS X), install Elixir with [Homebrew](https://brew.sh/):
+
+```sh
+brew install elixir
+```
+
+Homebrew installs Erlang/OTP as a dependency. On other operating systems,
+follow the [Elixir installation instructions](https://elixir-lang.org/install/).
+Check your installation with `elixir --version`.
+
+Install Git if needed, then download Geri and set up Hex, Mix's package manager:
+
+```sh
+brew install git
+git clone https://github.com/realNeodome/geri.git
+cd geri
+mix local.hex --force
+```
+
+Fetch the application dependencies, build the release, and install:
+
+```sh
+MIX_ENV=prod mix deps.get
+MIX_ENV=prod mix release --overwrite
+./install.sh
+```
+
+The installer defaults to `/usr/local`. If that directory requires elevated
+permissions, run only the installation step with `sudo ./install.sh` or from
+a root shell. Build as your normal user. The installer copies an already
+built release; it does not compile or fetch dependencies.
+
+For a personal installation without root, use:
+
+```sh
+./install.sh --prefix "$HOME/.local"
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Ensure the installation prefix's `bin` directory is in PATH, then run
+`geri --help`. Add the PATH setting to your shell startup file if needed.
+
+See [Building and installation](docs/installation.md) for more details,
+upgrades, and removal. If ExRatatui/Ratatui is unavailable on your platform,
+or you do not need a terminal UI, follow the guide's headless installation
+instructions; that build excludes the terminal UI and its native dependency.
+
 ## Basic usage
 
 The examples use placeholder server names. Replace them with your servers
@@ -26,8 +76,10 @@ machine news-a.example.invalid login YOUR_USERNAME password YOUR_PASSWORD
 ```
 
 Add one entry per server and restrict the file permissions with
-`chmod 600 ~/.authinfo`. Options precede filenames; `--` separates the two.
-These examples use TLS, the default yEnc encoding, and no TUI.
+`chmod 600 ~/.authinfo`.
+
+Options precede filenames; `--` separates the two. These examples use TLS,
+the default yEnc encoding, and no TUI.
 
 ### Simple upload
 
@@ -143,24 +195,6 @@ Run the regression tests locally:
 ```sh
 mix test test/failure_reporting_test.exs test/upload_duplicates_test.exs test/control_test.exs test/tui_input_test.exs test/inspection_test.exs test/ui_window_test.exs
 ```
-
-## Installation
-
-See [Building and installation](docs/installation.md) for standard and
-headless installation, installation prefixes, upgrades, and removal.
-
-Build a release and install it for your own account:
-
-```sh
-MIX_ENV=prod mix deps.get
-MIX_ENV=prod mix release --overwrite
-./install.sh --prefix "$HOME/.local"
-```
-
-Then add `$HOME/.local/bin` to PATH and run `geri --help`.
-If ExRatatui/Ratatui is unavailable on your platform, or you do not need a
-terminal UI, follow the headless installation instructions in the guide.
-That build excludes the terminal UI and its native dependency.
 
 ## License
 

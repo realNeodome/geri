@@ -6,19 +6,49 @@ The installer and launcher use `/bin/sh` and standard Unix tools;
 GNU coreutils are not required. Native builds and terminal behavior still
 need testing on each supported target.
 
-## Build with the TUI
+## Install dependencies and get the source
 
-Build prerequisites: Elixir 1.20 and a compatible Erlang/OTP installation.
-A build with TUI support also requires ExRatatui's native Ratatui library,
-either as a precompiled binary for your platform or built from source.
-Fetching dependencies requires network access.
+Geri requires Elixir 1.20 and a compatible Erlang/OTP installation. The
+examples below use macOS (OS X) with [Homebrew](https://brew.sh/).
+Install Elixir first:
+
+```sh
+brew install elixir
+elixir --version
+```
+
+Homebrew installs Erlang/OTP as a dependency. For other operating systems,
+follow the [Elixir installation instructions](https://elixir-lang.org/install/)
+and check that the installed Elixir version meets Geri's requirement.
+
+Install Git if needed, then clone Geri and set up Hex, Mix's package manager:
+
+```sh
+brew install git
+git clone https://github.com/realNeodome/geri.git
+cd geri
+mix local.hex --force
+```
+
+Fetching dependencies requires network access. A build with TUI support
+also requires ExRatatui's native Ratatui library, either as a precompiled
+binary for your platform or built from source. If it is unavailable, use
+the headless installation below.
+
+## Build and install with the TUI
 
 From the Geri source directory:
 
 ```sh
 MIX_ENV=prod mix deps.get
 MIX_ENV=prod mix release --overwrite
+./install.sh
 ```
+
+`./install.sh` installs into `/usr/local` by default. If elevated permissions
+are needed, run only this step with `sudo ./install.sh` or from a root shell.
+Build as your normal user. For a personal installation without root, use
+`./install.sh --prefix "$HOME/.local"` instead.
 
 `mix release` compiles the production application as needed. A separate
 `mix compile` or `mix escript.build` is not required to install this release.
@@ -37,8 +67,11 @@ and graceful signal cancellation. Requesting `--tui` returns an error.
 ```sh
 GERI_TUI=false MIX_ENV=prod mix deps.get
 GERI_TUI=false MIX_ENV=prod mix release --overwrite
-./install.sh --prefix "$HOME/.local" --release _build/headless/prod/rel/geri
+./install.sh --release _build/headless/prod/rel/geri
 ```
+
+The same prefix and permissions choices apply: the command above installs
+into `/usr/local`; add `--prefix "$HOME/.local"` for a personal installation.
 
 This release is built in `_build/headless/prod/rel/geri`, independently of
 the normal build. Keep `GERI_TUI=false` on all Mix commands for this variant.
@@ -55,24 +88,31 @@ tests when the TUI is present. The core regression command above does not requir
 
 ## Choose an installation prefix
 
+For the default installation into `/usr/local`:
+
+```sh
+./install.sh
+```
+
+If `/usr/local` requires elevated permissions, use `sudo ./install.sh` or
+run it from a root shell. Build the release as your normal user.
+
 For a personal installation (no root required):
 
 ```sh
 ./install.sh --prefix "$HOME/.local"
 ```
 
-For a system installation:
-
-```sh
-sudo ./install.sh --prefix /usr/local
-```
-
 For the headless release, supply its build directory explicitly:
 
 ```sh
+./install.sh --release _build/headless/prod/rel/geri
+```
+
+To install that release for your own account:
+
+```sh
 ./install.sh --prefix "$HOME/.local" --release _build/headless/prod/rel/geri
-# Or install system-wide, after building as your normal user:
-sudo ./install.sh --prefix /usr/local --release _build/headless/prod/rel/geri
 ```
 
 The installer only copies an already built release; it does not run Mix,
