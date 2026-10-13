@@ -212,7 +212,7 @@ if System.get_env("GERI_TUI") != "false" do
           Line.new(
             shown_server ++
               [Span.new(" ")] ++
-              truncate_spans(from_spans, available_from)
+              truncate_spans_with_ellipsis(from_spans, available_from)
           )
       end
     end
@@ -793,9 +793,10 @@ if System.get_env("GERI_TUI") != "false" do
       end)
     end
 
-    defp truncate_spans(_spans, width) when width <= 0, do: []
+    defp truncate_spans(spans, width, truncate \\ &fit/2)
+    defp truncate_spans(_spans, width, _truncate) when width <= 0, do: []
 
-    defp truncate_spans(spans, width) do
+    defp truncate_spans(spans, width, truncate) do
       {result, _remaining} =
         Enum.reduce_while(spans, {[], width}, fn span, {result, remaining} ->
           length = String.length(span.content)
@@ -807,7 +808,7 @@ if System.get_env("GERI_TUI") != "false" do
             remaining > 0 ->
               shortened =
                 Span.new(
-                  fit(span.content, remaining),
+                  truncate.(span.content, remaining),
                   style: span.style
                 )
 
@@ -832,7 +833,7 @@ if System.get_env("GERI_TUI") != "false" do
         ellipsis_width = min(3, width)
         content_width = max(width - ellipsis_width, 0)
 
-        truncate_spans(spans, content_width) ++
+        truncate_spans(spans, content_width, &String.slice(&1, 0, &2)) ++
           [Span.new(String.duplicate(".", ellipsis_width), style: @server_separator_style)]
       end
     end

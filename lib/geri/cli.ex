@@ -16,7 +16,7 @@ defmodule Geri.CLI do
     repair_username: :string, repair_auth_file: :string,
     repair_reader: :boolean, repair_connections: :integer,
     reconnect_delay: :integer, message_id_domain: :string,
-    server_path: :string, tui: :boolean, verbose: :boolean,
+    tui: :boolean, verbose: :boolean,
     help: :boolean, version: :boolean
   ]
 
@@ -70,7 +70,6 @@ defmodule Geri.CLI do
     --verbose                Debug logging
     --reconnect-delay MS
     --message-id-domain DOMAIN
-    --server-path PATH
     --help                   Show help
     --version                Show version
 

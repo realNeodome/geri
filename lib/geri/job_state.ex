@@ -82,8 +82,8 @@ defmodule Geri.JobState do
           from: Keyword.fetch!(opts, :from),
           comment: Keyword.get(opts, :comment),
           connections: Keyword.get(opts, :connections, 1),
-          server_path: Keyword.get(opts, :server_path),
           checking_server: checking_server_config(opts),
+          repair_server: repair_server_config(opts),
           checking_connections: Keyword.get(opts, :check_connections, 2)
         },
         posting: posting_config(opts),
@@ -826,17 +826,7 @@ defmodule Geri.JobState do
   defp default_port(:implicit), do: 563
   defp default_port(_tls), do: 119
 
-  defp server_path(state) do
-    case state.job.server_path do
-      nil ->
-        default_server_path(state)
-
-      servers ->
-        Enum.map(servers, &normalize_server_endpoint/1)
-    end
-  end
-
-  defp default_server_path(state) do
+  defp job_servers(state) do
     posting = %{
       host: state.posting.host,
       port: state.posting.port
@@ -847,26 +837,20 @@ defmodule Geri.JobState do
         [posting]
 
       checking ->
-        [posting, checking]
+        repair = state.job.repair_server
+        [posting, checking] ++ if(repair == checking, do: [], else: [repair])
     end
   end
 
-  defp normalize_server_endpoint(server) when is_map(server) do
-    tls = Map.get(server, :tls, :implicit)
-
-    %{
-      host: Map.get(server, :host),
-      port: Map.get(server, :port) || default_port(tls)
-    }
-  end
-
-  defp normalize_server_endpoint(server) when is_list(server) do
-    tls = Keyword.get(server, :tls, :implicit)
-
-    %{
-      host: Keyword.get(server, :host),
-      port: Keyword.get(server, :port) || default_port(tls)
-    }
+  defp repair_server_config(opts) do
+    case checking_server_config(opts) do
+      nil -> nil
+      checking ->
+        tls = Keyword.get(opts, :repair_tls) || Keyword.get(opts, :check_tls, :implicit)
+        port = Keyword.get(opts, :repair_port) ||
+          if(Keyword.has_key?(opts, :repair_host), do: default_port(tls), else: checking.port)
+        %{host: Keyword.get(opts, :repair_host) || checking.host, port: port}
+    end
   end
 
   defp snapshot_state(state) do
@@ -892,7 +876,7 @@ defmodule Geri.JobState do
         tls: state.posting.tls,
         newsgroups: state.posting.newsgroups
       },
-      servers: server_path(state),
+      servers: job_servers(state),
       progress: %{
         active_file: state.ui.active_file,
         total_bytes: state.job.total_bytes,
