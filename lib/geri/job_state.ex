@@ -92,7 +92,7 @@ defmodule Geri.JobState do
         verification: %{confirmed: MapSet.new(), missing: MapSet.new(),
                         repaired: MapSet.new(), repair_failed: MapSet.new(),
                         inconclusive: MapSet.new(), unresolved: %{}},
-        recovery: %{files: %{}},
+        recovery: %{files: %{}, completed_files: 0},
         nzb: build_nzb_state(nzb, length(paths)),
         ui: %{
           active_file: 1,
@@ -194,6 +194,12 @@ defmodule Geri.JobState do
 
   def handle_call(:snapshot, _from, state) do
     {:reply, snapshot_state(state), state}
+  end
+
+  def handle_call(:finalize, _from, state)
+      when state.recovery.completed_files != state.job.file_total or
+             map_size(state.recovery.files) != 0 do
+    {:reply, {:error, :upload_incomplete}, state}
   end
 
   def handle_call(:finalize, _from, state) do
@@ -327,12 +333,15 @@ defmodule Geri.JobState do
   end
 
   defp purge_completed_recovery(state) do
-    files =
+    {completed, pending} =
       state.recovery.files
-      |> Enum.reject(fn {_number, file} -> recovery_file_complete?(file) end)
-      |> Map.new()
+      |> Enum.split_with(fn {_number, file} -> recovery_file_complete?(file) end)
 
-    put_in(state.recovery.files, files)
+    recovery = %{state.recovery |
+      files: Map.new(pending),
+      completed_files: state.recovery.completed_files + length(completed)
+    }
+    %{state | recovery: recovery}
   end
 
   defp prepare_ui_part(state, part) do

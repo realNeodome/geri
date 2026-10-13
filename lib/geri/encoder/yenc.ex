@@ -15,7 +15,7 @@ defmodule Geri.Encoder.YEnc do
 
       stream =
         path
-        |> File.stream!(part_size, [])
+        |> Geri.Encoder.Source.stream_file(part_size, stat.size)
         |> Stream.with_index(1)
         |> Stream.transform(
           {0, 0},
@@ -54,6 +54,7 @@ defmodule Geri.Encoder.YEnc do
             item = %{
               encoding: :yenc,
               filename: filename,
+              file_size: stat.size,
               part: part,
               total: total,
               source_hash: source_hash,

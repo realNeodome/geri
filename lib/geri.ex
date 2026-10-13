@@ -183,6 +183,11 @@ defmodule Geri do
         try do
           produce(queue, job, paths, opts)
         rescue
+          error in Geri.Encoder.Source.SizeChangedError ->
+            reason = {:source_size_changed, error.path, error.expected_size, error.actual_size}
+            Geri.Queue.abort(queue, reason)
+            {:error, reason}
+
           error in File.Error ->
             reason = {:file_read_failed, error.path, error.reason}
             Geri.Queue.abort(queue, reason)
@@ -306,11 +311,7 @@ defmodule Geri do
         "[#{file_number}/#{file_total}]"
     )
 
-    with {:ok, stat} <-
-           File.stat(
-             path
-           ),
-         {:ok, parts} <-
+    with {:ok, parts} <-
            stream_file(
              path,
              encoding,
@@ -325,7 +326,6 @@ defmodule Geri do
             |> Map.merge(%{
               file_number: file_number,
               file_total: file_total,
-              file_size: stat.size,
               offset: part_offset(part, encoding, part_size)
             })
             |> put_subject(

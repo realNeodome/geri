@@ -49,12 +49,13 @@ defmodule Geri.Encoder.UUEncode do
 
       stream =
         path
-        |> File.stream!(effective_size, [])
+        |> Geri.Encoder.Source.stream_file(effective_size, stat.size)
         |> Stream.with_index(1)
         |> Stream.map(fn {binary, part} ->
           %{
             encoding: :uuencode,
             filename: filename,
+            file_size: stat.size,
             part: part,
             total: total,
             source_hash: :crypto.hash(:sha256, binary),
