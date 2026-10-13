@@ -84,10 +84,11 @@ upgrading an installed release.
 The examples use placeholder server names. Replace them with your servers
 and choose a group where posting is allowed. Credentials are read from
 `~/.authinfo` or `~/.netrc`; use `--auth-file FILE` to choose another file.
-For example, a `.authinfo` entry is:
+For example, `.authinfo` can contain:
 
 ```text
-machine news-a.example.invalid login YOUR_USERNAME password YOUR_PASSWORD
+machine news-a.example.com login YOUR_USERNAME_A password YOUR_PASSWORD_A
+machine news-b.example.com login YOUR_USERNAME_B password YOUR_PASSWORD_B
 ```
 
 Add one entry per server and restrict the file permissions with
@@ -108,7 +109,7 @@ authentication.
 Posting on A, checking on B, and repairing on C resolve their credentials
 independently. ABB repair inherits B's resolved credentials unless repair
 endpoint or authentication options override them. Incomplete credentials
-and credentials containing carriage returns or newlines are rejected.
+are rejected.
 
 Options precede filenames; `--` separates the two. These examples use TLS,
 the default yEnc encoding, and no TUI.
@@ -124,8 +125,8 @@ Post files to server A and write an NZB:
 
 ```sh
 geri upload \
-  --host news-a.example.invalid --tls implicit \
-  --from 'Uploader <uploader@example.invalid>' \
+  --host news-a.example.com --tls implicit \
+  --from 'Uploader <uploader@example.com>' \
   --group alt.binaries.test \
   --part-size 700K --connections 8 \
   --nzb upload.nzb --no-tui -- ./*.bin
@@ -139,9 +140,9 @@ server, so `--repair-host` is unnecessary here. B must permit posting.
 
 ```sh
 geri upload \
-  --host news-a.example.invalid --tls implicit \
-  --check-host news-b.example.invalid --check-tls implicit \
-  --from 'Uploader <uploader@example.invalid>' \
+  --host news-a.example.com --tls implicit \
+  --check-host news-b.example.com --check-tls implicit \
+  --from 'Uploader <uploader@example.com>' \
   --group alt.binaries.test \
   --part-size 700K --connections 8 \
   --check-connections 2 --repair-connections 2 \
@@ -155,10 +156,10 @@ on B; `--repair-host` does not change the checking server.
 
 ```sh
 geri upload \
-  --host news-a.example.invalid --tls implicit \
-  --check-host news-b.example.invalid --check-tls implicit \
-  --repair-host news-c.example.invalid --repair-tls implicit \
-  --from 'Uploader <uploader@example.invalid>' \
+  --host news-a.example.com --tls implicit \
+  --check-host news-b.example.com --check-tls implicit \
+  --repair-host news-c.example.com --repair-tls implicit \
+  --from 'Uploader <uploader@example.com>' \
   --group alt.binaries.test \
   --part-size 700K --connections 8 \
   --check-connections 2 --repair-connections 2 \
