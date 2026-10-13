@@ -11,32 +11,28 @@ defmodule Geri.NZB do
     temp_path = path <> ".part"
 
     cond do
-      File.exists?(path) ->
+      match?({:ok, _}, File.lstat(path)) ->
         {:error, {:nzb_exists, path}}
-
-      File.exists?(temp_path) ->
-        {:error, {:nzb_temp_exists, temp_path}}
 
       true ->
         Logger.info("creating NZB #{temp_path}")
 
         case File.open(
                temp_path,
-               [:write, :binary]
+               [:write, :binary, :exclusive]
              ) do
           {:ok, io} ->
-            :ok =
-              IO.binwrite(
-                io,
-                header()
-              )
+            case IO.binwrite(io, header()) do
+              :ok ->
+                {:ok, %__MODULE__{io: io, path: path, temp_path: temp_path}}
 
-            {:ok,
-             %__MODULE__{
-               io: io,
-               path: path,
-               temp_path: temp_path
-             }}
+              {:error, reason} ->
+                File.close(io)
+                {:error, {:nzb_open_failed, reason}}
+            end
+
+          {:error, :eexist} ->
+            {:error, {:nzb_temp_exists, temp_path}}
 
           {:error, reason} ->
             {:error, {:nzb_open_failed, reason}}
@@ -70,18 +66,17 @@ defmodule Geri.NZB do
   def finalize(%__MODULE__{} = nzb) do
     Logger.debug("finalizing NZB #{nzb.path}")
 
-    :ok =
-      IO.binwrite(
-        nzb.io,
-        "</nzb>\n"
-      )
-
-    with :ok <-
+    with :ok <- IO.binwrite(nzb.io, "</nzb>\n"),
+         :ok <-
            File.close(nzb.io),
          :ok <-
-           File.rename(
+           File.ln(
              nzb.temp_path,
              nzb.path
+           ),
+         :ok <-
+           File.rm(
+             nzb.temp_path
            ) do
       Logger.info("NZB finalized #{nzb.path}")
 

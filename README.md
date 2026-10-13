@@ -208,6 +208,11 @@ NZB as `.part`. A restart creates a new NZB; it does not continue writing the
 old `.part` file. Choose a new `--nzb` filename if the previous NZB or its
 `.part` file still exists.
 
+NZB output requires a filesystem that supports hard links. Geri creates
+`.part` exclusively and publishes the completed NZB without replacing an
+existing destination. On normal success, `.part` is removed. If publication
+fails, Geri reports a finalization error and retains the completed `.part`.
+
 ## Tests
 
 Run the regression tests locally:
