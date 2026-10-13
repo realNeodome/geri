@@ -52,12 +52,15 @@ defmodule Geri.Article do
 
     identity =
       [
-        "GERI",
+        # Version the identity: earlier builds hashed only source bytes and
+        # could reuse an ID for parts with different reconstruction metadata.
+        "GERI2",
         <<encoding_id(part.encoding)::8>>,
         <<byte_size(part.filename)::unsigned-big-32>>,
         part.filename,
         <<part.part::unsigned-big-64>>,
-        part.source_hash
+        <<part.total::unsigned-big-64>>,
+        :crypto.hash(:sha256, part.body)
       ]
       |> IO.iodata_to_binary()
 
