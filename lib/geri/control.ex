@@ -11,6 +11,14 @@ defmodule Geri.Control do
   def mode(control), do: GenServer.call(control, :mode)
   def await(nil), do: :ok
   def await(control), do: GenServer.call(control, :await, :infinity)
+  def wait(nil, delay), do: Process.sleep(delay)
+  def wait(control, delay) do
+    receive do
+      {:cancelled, ^control} -> {:error, :cancelled}
+    after
+      delay -> await(control)
+    end
+  end
   def await_idle(control), do: GenServer.call(control, :await_idle, :infinity)
   def checkout(nil, conn), do: {:ok, conn}
   def checkout(control, conn), do: GenServer.call(control, {:checkout, conn}, :infinity)
@@ -58,6 +66,7 @@ defmodule Geri.Control do
   def handle_call(:cancel, _from, %{mode: :cancelled} = state), do: {:reply, :already_cancelled, state}
   def handle_call(:cancel, _from, state) do
     Enum.each(state.queues, &abort_queue/1)
+    Enum.each(state.actors, fn {pid, _actor} -> send(pid, {:cancelled, self()}) end)
     Enum.each(state.waiters, fn {from, _} -> GenServer.reply(from, {:error, :cancelled}) end)
     timer = Process.send_after(self(), :cancel_timeout, @cancel_timeout)
     state = close_idle(%{state | mode: :cancelled, waiters: [], timer: timer})

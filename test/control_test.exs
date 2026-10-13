@@ -31,6 +31,29 @@ defmodule Geri.ControlTest do
     assert {:error, :cancelled} = Task.await(task)
   end
 
+  test "cancel interrupts a long retry delay", %{control: control} do
+    parent = self()
+    task = Task.async(fn ->
+      Geri.Control.checkout(control, nil)
+      Geri.Control.checkin(control, nil)
+      send(parent, :waiting)
+      result = Geri.Control.wait(control, 180_000)
+      Geri.Control.release(control)
+      result
+    end)
+    assert_receive :waiting
+    Geri.Control.cancel(control)
+    assert {:error, :cancelled} = Task.await(task, 1_000)
+  end
+
+  test "retry delay respects a pause before allowing more work", %{control: control} do
+    Geri.Control.pause(control)
+    task = Task.async(fn -> Geri.Control.wait(control, 0) end)
+    assert Task.yield(task, 20) == nil
+    Geri.Control.resume(control)
+    assert :ok = Task.await(task)
+  end
+
   test "pause closes idle connections with QUIT and resumes without a stale socket", %{control: control} do
     {conn, peer, listener} = connection()
     assert {:ok, ^conn} = Geri.Control.checkout(control, conn)

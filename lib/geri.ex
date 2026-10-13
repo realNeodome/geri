@@ -120,7 +120,8 @@ defmodule Geri do
 
   defp complete_upload(queue, job, checker, paths, connections, opts) do
     result = run_upload(queue, job, paths, connections, opts)
-    result = if Geri.Control.mode(opts[:control]) == :cancelled, do: {:error, :cancelled}, else: result
+    result = if result == :ok and Geri.Control.mode(opts[:control]) == :cancelled,
+      do: {:error, :cancelled}, else: result
 
     case result do
       :ok ->
@@ -203,24 +204,28 @@ defmodule Geri do
 
     Geri.Control.put_context(opts[:control], %{producer: producer.pid, workers: Enum.map(workers, & &1.pid)})
 
-    results =
-      [producer | workers]
-      |> Task.await_many(
-        :infinity
-      )
+    pending = Map.new([producer | workers], &{&1.ref, &1.pid})
+    await_upload(pending, opts[:control], :ok)
+  end
 
-    case Enum.find(
-           results,
-           &match?(
-             {:error, _},
-             &1
-           )
-         ) do
-      nil ->
-        :ok
+  defp await_upload(pending, _control, result) when map_size(pending) == 0, do: result
+  defp await_upload(pending, control, result) do
+    receive do
+      {ref, task_result} when is_map_key(pending, ref) ->
+        Process.demonitor(ref, [:flush])
+        result =
+          case {result, task_result} do
+            {:ok, {:error, _} = error} ->
+              # Cancel before waiting for peers, retaining the original failure.
+              Geri.Control.cancel(control)
+              error
 
-      error ->
-        error
+            _ -> result
+          end
+        await_upload(Map.delete(pending, ref), control, result)
+
+      {:DOWN, ref, :process, _pid, reason} when is_map_key(pending, ref) ->
+        exit({:upload_task_exited, reason})
     end
   end
 
@@ -722,8 +727,9 @@ defmodule Geri do
         {:error, reason} ->
           Geri.Control.checkin(opts[:control], nil)
           Logger.warning("worker #{worker} reconnect failed: #{inspect(reason)}")
-          Process.sleep(delay)
-          reconnect(worker, opts)
+          with :ok <- Geri.Control.wait(opts[:control], delay) do
+            reconnect(worker, opts)
+          end
       end
     end
   end
