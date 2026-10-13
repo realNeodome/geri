@@ -64,6 +64,21 @@ upgrades, and removal. If ExRatatui/Ratatui is unavailable on your platform,
 or you do not need a terminal UI, follow the guide's headless installation
 instructions; that build excludes the terminal UI and its native dependency.
 
+### Updating an existing installation
+
+After updating or changing the source, rebuild the release:
+
+```sh
+MIX_ENV=prod mix release --overwrite
+```
+
+`mix release` compiles the production application as needed; separate
+`mix compile` and `mix escript.build` commands are not required. If you use
+an installed copy, rerun the installer with the same prefix after rebuilding
+to update it. Follow the [installation guide](docs/installation.md) for
+headless builds and other installation options. Stop running jobs before
+upgrading an installed release.
+
 ## Basic usage
 
 The examples use placeholder server names. Replace them with your servers
@@ -80,6 +95,11 @@ Add one entry per server and restrict the file permissions with
 
 Options precede filenames; `--` separates the two. These examples use TLS,
 the default yEnc encoding, and no TUI.
+
+Run the installed release with `geri upload ...`, or use `./geri.sh upload ...`
+from the source directory after building the release. For interactive
+progress and controls, replace `--no-tui` with `--tui` in a build with TUI
+support. Run `geri --help` for all options.
 
 ### Simple upload
 
@@ -128,29 +148,10 @@ geri upload \
   --nzb upload-abc.nzb --no-tui -- ./*.bin
 ```
 
-Geri prints a generated upload key. Add `--upload-key 'YOUR_SAVED_KEY'`
-when retrying the same batch with unchanged files, encoding, and part size;
-Geri uses STAT to skip articles already present on the posting server.
-Add `--tui` after removing `--no-tui` for interactive progress and controls
-in a build with TUI support. Run `geri --help` for all options.
-
 ## Upload controls
 
-Build the release after changing the source:
-
-```sh
-MIX_ENV=prod mix release --overwrite
-```
-
-`mix release` compiles the production application as needed; separate
-`mix compile` and `mix escript.build` commands are not required. If you use
-an installed copy, rerun the installer after rebuilding to update it.
-See [Building and installation](docs/installation.md) for the initial build
-and headless installation.
-
-Run the installed release with `geri upload ...`, or use `./geri.sh upload ...`
-from the source directory. The launcher handles Ctrl-C
-without the Erlang break menu. The first Ctrl-C requests cancellation;
+The `geri` and `./geri.sh` launchers handle Ctrl-C without the Erlang break
+menu. The first Ctrl-C requests cancellation;
 a second Ctrl-C forces exit. Cancellation returns shell exit status 130.
 Active operations can finish before shutdown; stalled connections are
 closed after a ten-second grace period. A connection still being established
@@ -160,9 +161,13 @@ With `--tui`, press `p` to pause or resume. New posting, checking, and repair
 operations wait while paused; active operations finish and idle connections
 close. Queues, recovery information, and the NZB writer stay in memory.
 Press `q` or Escape to hide the TUI; this does not cancel the upload.
+Pause does not persist state across process exits.
 
-Press backtick (`) to pause and open IEx in the same running VM. The prompt
-prints the available bindings and how to return. For example:
+### IEx inspection
+
+With the TUI active, press backtick (`` ` ``) to pause and open IEx in the same
+running VM. The prompt prints the available bindings and how to return.
+For example:
 
 ```elixir
 Geri.JobState.snapshot(job)
@@ -185,10 +190,23 @@ See the [IEx inspection guide](docs/iex-inspection.md) for examples of
 examining progress, verification, queues, worker processes, recovery state
 and NZB bookkeeping.
 
-Cancellation preserves an unfinished NZB as `.part`. To retry, use the same
-source files, part size, encoding, and `--upload-key`; STAT skips articles
-already present on the posting server. Pause itself does not persist state
-across process exits.
+## Retrying an interrupted upload
+
+Geri prints an upload key when the job starts. Save it and add
+`--upload-key 'YOUR_SAVED_KEY'` when restarting the same batch with the same
+encoding and part size. Geri rebuilds the articles from the current source
+files and uses STAT to skip Message-IDs already present on the posting server.
+
+If a source file intentionally changed, wait until it stops changing before
+restarting. Articles whose Message-IDs remain unchanged can be skipped;
+changed articles receive new IDs and are posted. Changing a yEnc file's size
+or total part count can change every article's ID, requiring the whole file
+to be posted again. Articles from the earlier version remain on the server.
+
+If an NZB was requested, cancellation or failure preserves the unfinished
+NZB as `.part`. A restart creates a new NZB; it does not continue writing the
+old `.part` file. Choose a new `--nzb` filename if the previous NZB or its
+`.part` file still exists.
 
 ## Tests
 
