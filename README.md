@@ -193,8 +193,12 @@ across process exits.
 Run the regression tests locally:
 
 ```sh
-mix test test/failure_reporting_test.exs test/upload_duplicates_test.exs test/control_test.exs test/tui_input_test.exs test/inspection_test.exs test/ui_window_test.exs
+mix test
 ```
+
+This runs all test files, including the timeout and repair regressions.
+Some tests exercise the real 30-second network timeout, so allow roughly
+90 seconds for the suite. For a headless build, use `GERI_TUI=false mix test`.
 
 ## License
 

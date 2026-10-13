@@ -77,14 +77,15 @@ This release is built in `_build/headless/prod/rel/geri`, independently of
 the normal build. Keep `GERI_TUI=false` on all Mix commands for this variant.
 The installed release does not need that environment variable.
 
-Run the core regression tests with:
+Run all regression tests for the headless build with:
 
 ```sh
-GERI_TUI=false mix test test/failure_reporting_test.exs test/upload_duplicates_test.exs test/control_test.exs test/inspection_test.exs test/ui_window_test.exs
+GERI_TUI=false mix test
 ```
 
-The TUI input test is separate (`test/tui_input_test.exs`) and only defines
-tests when the TUI is present. The core regression command above does not require a terminal.
+The TUI input tests only run when the TUI is present, so the headless test
+suite does not require a terminal. Some network tests exercise real timeouts;
+allow roughly 90 seconds for the suite.
 
 ## Choose an installation prefix
 
