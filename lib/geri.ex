@@ -547,6 +547,13 @@ defmodule Geri do
 
           {:error, stat_reason} ->
             Logger.warning("worker #{worker} could not check #{article.message_id} after posting rejection: #{inspect(stat_reason)}")
+            conn =
+              case stat_reason do
+                {:stat_failed, _code, _message} -> conn
+                _ ->
+                  Geri.NNTP.close(conn)
+                  nil
+              end
             {:error, reason, conn}
         end
 
@@ -600,9 +607,13 @@ defmodule Geri do
         :missing ->
           post_with_recovery(conn, part, article, worker, opts)
 
-        {:error, reason} ->
+        {:error, {:stat_failed, _code, _message} = reason} ->
           Logger.warning("worker #{worker} could not check #{article.message_id} before posting: #{inspect(reason)}; attempting POST")
           post_with_recovery(conn, part, article, worker, opts)
+
+        {:error, reason} ->
+          Logger.warning("worker #{worker} lost the STAT response for #{article.message_id}: #{inspect(reason)}; reconnecting")
+          reconnect_and_retry(conn, part, article, worker, opts, true)
       end
     else
       post_with_recovery(conn, part, article, worker, opts)
@@ -657,7 +668,7 @@ defmodule Geri do
             opts
           )
 
-        {:error, reason} ->
+        {:error, {:stat_failed, _code, _message} = reason} ->
           Logger.warning(
             "worker #{worker} could not verify " <>
               "#{article.message_id}: " <>
@@ -671,6 +682,10 @@ defmodule Geri do
             worker,
             opts
           )
+
+        {:error, reason} ->
+          Logger.warning("worker #{worker} lost the verification response for #{article.message_id}: #{inspect(reason)}; reconnecting")
+          reconnect_and_retry(conn, part, article, worker, opts, true)
       end
     else
       post_with_recovery(
