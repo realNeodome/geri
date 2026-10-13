@@ -190,6 +190,8 @@ source files, part size, encoding, and `--upload-key`; STAT skips articles
 already present on the posting server. Pause itself does not persist state
 across process exits.
 
+## Tests
+
 Run the regression tests locally:
 
 ```sh
