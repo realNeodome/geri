@@ -1176,43 +1176,40 @@ defmodule Geri do
       nil ->
         {:ok, opts}
 
-      _check_host ->
-        case Keyword.get(opts, :repair_host) do
-          nil ->
-            {:ok, opts}
+      check_host ->
+        separate = not is_nil(opts[:repair_host])
+        host = opts[:repair_host] || check_host
+        tls = opts[:repair_tls] || if(separate, do: :implicit, else: opts[:check_tls])
+        port = opts[:repair_port] || if(separate, do: default_port(tls), else: opts[:check_port])
+        inherit = not separate and port == opts[:check_port] and
+          is_nil(opts[:repair_username]) and is_nil(opts[:repair_password]) and
+          not Keyword.has_key?(opts, :repair_auth_file)
 
-          host ->
-            tls = Keyword.get(opts, :repair_tls, :implicit)
-            port = Keyword.get(opts, :repair_port) || default_port(tls)
+        repair_opts = [host: host, port: port, tls: tls,
+          username: opts[:repair_username], password: opts[:repair_password]]
+        default_auth_file = if separate, do: opts[:auth_file],
+          else: Keyword.get(opts, :check_auth_file, opts[:auth_file])
+        repair_opts = case Keyword.get(opts, :repair_auth_file, default_auth_file) do
+          nil -> repair_opts
+          auth_file -> Keyword.put(repair_opts, :auth_file, auth_file)
+        end
 
-            repair_opts = [
-              host: host,
-              port: port,
-              tls: tls,
-              username: Keyword.get(opts, :repair_username),
-              password: Keyword.get(opts, :repair_password)
-            ]
+        result = if inherit do
+          {:ok, [username: opts[:check_username], password: opts[:check_password]]}
+        else
+          Geri.Auth.resolve(repair_opts)
+        end
 
-            repair_opts =
-              case Keyword.get(opts, :repair_auth_file, Keyword.get(opts, :auth_file)) do
-                nil -> repair_opts
-                auth_file -> Keyword.put(repair_opts, :auth_file, auth_file)
-              end
+        case result do
+          {:ok, resolved} ->
+            {:ok, opts
+              |> Keyword.put(:repair_port, port)
+              |> Keyword.put(:repair_tls, tls)
+              |> maybe_put(:repair_username, resolved[:username])
+              |> maybe_put(:repair_password, resolved[:password])}
 
-            case Geri.Auth.resolve(repair_opts) do
-              {:ok, resolved} ->
-                opts =
-                  opts
-                  |> Keyword.put(:repair_port, port)
-                  |> Keyword.put(:repair_tls, tls)
-                  |> maybe_put(:repair_username, Keyword.get(resolved, :username))
-                  |> maybe_put(:repair_password, Keyword.get(resolved, :password))
-
-                {:ok, opts}
-
-              {:error, reason} ->
-                {:error, {:repair_auth, reason}}
-            end
+          {:error, reason} ->
+            {:error, {:repair_auth, reason}}
         end
     end
   end
@@ -1258,20 +1255,6 @@ defmodule Geri do
           Keyword.fetch!(opts, :check_port)
         end
 
-    repair_username =
-      if Keyword.has_key?(opts, :repair_host) do
-        Keyword.get(opts, :repair_username)
-      else
-        Keyword.get(opts, :check_username)
-      end
-
-    repair_password =
-      if Keyword.has_key?(opts, :repair_host) do
-        Keyword.get(opts, :repair_password)
-      else
-        Keyword.get(opts, :check_password)
-      end
-
     repair_reader =
       if Keyword.has_key?(opts, :repair_host) do
         Keyword.get(opts, :repair_reader, false)
@@ -1312,8 +1295,8 @@ defmodule Geri do
         tls: repair_tls,
         tls_verify: repair_tls_verify,
         tls_ca_file: repair_tls_ca_file,
-        username: repair_username,
-        password: repair_password,
+        username: Keyword.get(opts, :repair_username),
+        password: Keyword.get(opts, :repair_password),
         reader: repair_reader,
         repair_connections: Keyword.get(opts, :repair_connections, 2),
         reconnect_delay: Keyword.get(opts, :reconnect_delay, 5_000)

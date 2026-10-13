@@ -42,6 +42,12 @@ defmodule Geri.NNTP do
   end
 
   def authenticate(conn, username, password, opts) do
+    with :ok <- Geri.Auth.validate_credentials(username, password) do
+      authenticate_pair(conn, username, password, opts)
+    end
+  end
+
+  defp authenticate_pair(conn, username, password, opts) do
     Logger.debug("#{log_prefix(opts)}sending AUTHINFO USER")
 
     case command(

@@ -2,63 +2,61 @@ defmodule Geri.Auth do
   import Bitwise
 
   def resolve(opts) do
-    host =
-      Keyword.get(
-        opts,
-        :host
-      )
+    host = opts[:host]
 
-    port =
-      effective_port(opts)
+    with :ok <- validate_value(:username, opts[:username]),
+         :ok <- validate_value(:password, opts[:password]) do
+      if not is_nil(opts[:password]) or not is_binary(host) do
+        with :ok <- validate_credentials(opts[:username], opts[:password]), do: {:ok, opts}
+      else
+        with {:ok, credentials} <- find_credentials(host, effective_port(opts), opts) do
+          resolved = opts
+            |> put_if_missing(:username, credentials[:login])
+            |> put_if_missing(:password, credentials[:password])
 
-    if is_binary(host) do
-      with {:ok, credentials} <-
-             find_credentials(
-               host,
-               port,
-               opts
-             ) do
-        {:ok,
-         opts
-         |> put_if_missing(
-           :username,
-           credentials[:login]
-         )
-         |> put_if_missing(
-           :password,
-           credentials[:password]
-         )}
+          with :ok <- validate_credentials(resolved[:username], resolved[:password]),
+            do: {:ok, resolved}
+        end
       end
-    else
-      {:ok, opts}
     end
   end
 
-  defp find_credentials(
-         host,
-         port,
-         opts
-       ) do
-    auth_files(opts)
-    |> Enum.reduce_while(
-      {:ok, %{}},
-      fn path, _acc ->
-        case read_file(
-               path,
-               host,
-               port
-             ) do
-          {:ok, nil} ->
-            {:cont, {:ok, %{}}}
-
-          {:ok, credentials} ->
-            {:halt, {:ok, credentials}}
-
-          {:error, reason} ->
-            {:halt, {:error, reason}}
-        end
+  def validate_credentials(username, password) do
+    with :ok <- validate_value(:username, username),
+         :ok <- validate_value(:password, password) do
+      case {username, password} do
+        {nil, nil} -> :ok
+        {nil, _} -> {:error, :incomplete_credentials}
+        {_, nil} -> {:error, :incomplete_credentials}
+        _ -> :ok
       end
-    )
+    end
+  end
+
+  defp validate_value(_field, nil), do: :ok
+  defp validate_value(field, value) when is_binary(value) do
+    if String.contains?(value, ["\r", "\n"]),
+      do: {:error, {:invalid_credentials, field}}, else: :ok
+  end
+  defp validate_value(field, _value), do: {:error, {:invalid_credentials, field}}
+
+  defp find_credentials(host, port, opts) do
+    auth_files(opts)
+    |> Enum.reduce_while({:ok, nil}, fn path, {:ok, best} ->
+      case read_file(path, host, port, opts[:username]) do
+        {:ok, credentials} ->
+          best = if credential_rank(credentials) < credential_rank(best), do: credentials, else: best
+          result = {:ok, best}
+          if credential_rank(best) == {0, 0}, do: {:halt, result}, else: {:cont, result}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, credentials} -> {:ok, credentials || %{}}
+      error -> error
+    end
   end
 
   defp auth_files(opts) do
@@ -92,7 +90,8 @@ defmodule Geri.Auth do
   defp read_file(
          path,
          host,
-         port
+         port,
+         username
        ) do
     case File.stat(path) do
       {:ok, stat} ->
@@ -109,7 +108,8 @@ defmodule Geri.Auth do
            select(
              entries,
              host,
-             port
+             port,
+             username
            )}
         end
 
@@ -272,11 +272,11 @@ defmodule Geri.Auth do
   defp select(
          entries,
          host,
-         port
+         port,
+         username
        ) do
-    Enum.find(
-      entries,
-      fn entry ->
+    entries
+    |> Enum.filter(fn entry ->
         machine_matches?(
           entry.machine,
           host
@@ -284,9 +284,14 @@ defmodule Geri.Auth do
           port_matches?(
             entry[:port],
             port
-          )
-      end
-    )
+          ) and (is_nil(username) or entry[:login] == username)
+    end)
+    |> Enum.min_by(&credential_rank/1, fn -> nil end)
+  end
+
+  defp credential_rank(nil), do: {2, 2}
+  defp credential_rank(entry) do
+    {if(entry.machine == :default, do: 1, else: 0), if(is_nil(entry[:port]), do: 1, else: 0)}
   end
 
   defp machine_matches?(
