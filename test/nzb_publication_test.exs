@@ -23,6 +23,33 @@ defmodule Geri.NZBPublicationTest do
     refute File.exists?(c.path <> ".part")
   end
 
+  test "footer write errors close the writer and return a finalization error", c do
+    {:ok, writer} = Geri.NZB.open(c.path)
+    :ok = File.close(writer.io)
+    parent = self()
+    device = spawn_link(fn -> failing_device(parent) end)
+
+    try do
+      assert {:error, {:nzb_finalize_failed, :enospc}} =
+               Geri.NZB.finalize(%{writer | io: device})
+      assert_receive {:writer_closed, ^device}
+      assert File.exists?(writer.temp_path)
+      refute File.read!(writer.temp_path) =~ "</nzb>"
+      refute File.exists?(writer.path)
+    after
+      Process.unlink(device)
+      if Process.alive?(device), do: Process.exit(device, :kill)
+    end
+  end
+
+  test "finalizing a closed writer returns an error without publishing", c do
+    {:ok, writer} = Geri.NZB.open(c.path)
+    :ok = File.close(writer.io)
+    assert {:error, {:nzb_finalize_failed, :terminated}} = Geri.NZB.finalize(writer)
+    assert File.exists?(writer.temp_path)
+    refute File.exists?(writer.path)
+  end
+
   test "an existing part is never truncated", c do
     part = c.path <> ".part"
     File.write!(part, "unfinished NZB")
@@ -163,6 +190,18 @@ defmodule Geri.NZBPublicationTest do
     case :gen_tcp.recv(socket, 0, 2_000) do
       {:ok, ".\r\n"} -> :ok
       {:ok, _line} -> receive_article(socket)
+    end
+  end
+
+  defp failing_device(parent) do
+    receive do
+      {:io_request, caller, ref, {:put_chars, :latin1, _data}} ->
+        send(caller, {:io_reply, ref, {:error, :enospc}})
+        failing_device(parent)
+
+      {:file_request, caller, ref, :close} ->
+        send(parent, {:writer_closed, self()})
+        send(caller, {:file_reply, ref, :ok})
     end
   end
 end

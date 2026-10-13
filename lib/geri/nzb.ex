@@ -22,13 +22,13 @@ defmodule Geri.NZB do
                [:write, :binary, :exclusive]
              ) do
           {:ok, io} ->
-            case IO.binwrite(io, header()) do
-              :ok ->
-                {:ok, %__MODULE__{io: io, path: path, temp_path: temp_path}}
-
-              {:error, reason} ->
+            try do
+              IO.binwrite(io, header())
+              {:ok, %__MODULE__{io: io, path: path, temp_path: temp_path}}
+            rescue
+              error in ErlangError ->
                 File.close(io)
-                {:error, {:nzb_open_failed, reason}}
+                {:error, {:nzb_open_failed, error.original}}
             end
 
           {:error, :eexist} ->
@@ -66,8 +66,9 @@ defmodule Geri.NZB do
   def finalize(%__MODULE__{} = nzb) do
     Logger.debug("finalizing NZB #{nzb.path}")
 
-    with :ok <- IO.binwrite(nzb.io, "</nzb>\n"),
-         :ok <-
+    IO.binwrite(nzb.io, "</nzb>\n")
+
+    with :ok <-
            File.close(nzb.io),
          :ok <-
            File.ln(
@@ -85,6 +86,10 @@ defmodule Geri.NZB do
       {:error, reason} ->
         {:error, {:nzb_finalize_failed, reason}}
     end
+  rescue
+    error in ErlangError ->
+      File.close(nzb.io)
+      {:error, {:nzb_finalize_failed, error.original}}
   end
 
   def abort(%__MODULE__{} = nzb) do
