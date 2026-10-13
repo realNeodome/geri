@@ -93,6 +93,23 @@ machine news-a.example.invalid login YOUR_USERNAME password YOUR_PASSWORD
 Add one entry per server and restrict the file permissions with
 `chmod 600 ~/.authinfo`.
 
+Without a command-line username, Geri takes both username and password from
+the matching entry. With `--username`, `--check-username`, or
+`--repair-username`, password lookup is restricted to that username on the
+selected server. An exact host-and-port entry takes precedence over a
+host-only entry; omitting `port` lets an entry match any port on that host.
+Server-specific entries take precedence over `default` entries. Equally
+specific matches use the earlier file entry, with `.authinfo` searched
+before `.netrc`.
+
+If no entry matches and no credentials were supplied, Geri connects without
+authentication.
+
+Posting on A, checking on B, and repairing on C resolve their credentials
+independently. ABB repair inherits B's resolved credentials unless repair
+endpoint or authentication options override them. Incomplete credentials
+and credentials containing carriage returns or newlines are rejected.
+
 Options precede filenames; `--` separates the two. These examples use TLS,
 the default yEnc encoding, and no TUI.
 
