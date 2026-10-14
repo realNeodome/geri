@@ -106,9 +106,10 @@ defmodule Geri.ArticleIdentityTest do
   end
 
   test "repair workers retain the original IDs for first and final parts", %{dir: dir} do
-    for {encoding, size} <- [yenc: 4, uuencode: 45, base64: 57] do
+    for {encoding, size} <- [yenc: 128, uuencode: 45, base64: 57] do
       path = Path.join(dir, "#{encoding}.bin")
-      binary = :binary.copy("a", size * 2)
+      byte = if encoding == :yenc, do: <<214>>, else: "a"
+      binary = :binary.copy(byte, size * 2)
       File.write!(path, binary)
       module = encoder(encoding)
       {:ok, stream} = module.stream_file(path, size)

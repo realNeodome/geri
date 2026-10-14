@@ -186,10 +186,12 @@ defmodule Geri.Encoder.YEnc do
         <<encoded>>
       end
 
-    next_column = column + 1
+    # Count encoded bytes; an escape pair at column 128 stays on this line,
+    # making it 129 bytes as permitted by the yEnc draft.
+    next_column = column + byte_size(output)
 
     {acc, next_column} =
-      if next_column == @line_length do
+      if next_column >= @line_length do
         {
           ["\r\n", output | acc],
           0
