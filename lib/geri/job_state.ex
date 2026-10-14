@@ -80,14 +80,14 @@ defmodule Geri.JobState do
         job: %{
           key: upload_key,
           encoding: Keyword.get(opts, :encoding, Geri.defaults()[:encoding]),
-          part_size: Keyword.get(opts, :part_size),
+          part_size: Keyword.get(opts, :part_size, Geri.defaults()[:part_size]),
           paths: paths,
           file_total: length(paths),
           total_bytes: total_bytes,
           started_at: System.monotonic_time(:millisecond),
           from: Keyword.fetch!(opts, :from),
           comment: Keyword.get(opts, :comment),
-          connections: Keyword.get(opts, :connections, 1),
+          connections: Keyword.get(opts, :connections, Geri.defaults()[:connections]),
           checking_server: checking_server_config(opts),
           repair_server: repair_server_config(opts),
           checking_connections: Keyword.get(opts, :check_connections, 2)

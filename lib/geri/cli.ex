@@ -161,53 +161,18 @@ defmodule Geri.CLI do
     end
   end
 
-  defp validate(opts, files) do
+  defp validate(opts, _files) do
     if Keyword.get(opts, :help, false) or Keyword.get(opts, :version, false) do
       :ok
     else
-      cond do
-        files == [] -> {:error, "at least one file is required"}
-        not present?(opts, :host) -> {:error, "--host is required"}
-        not present?(opts, :from) -> {:error, "--from is required"}
-        Keyword.get(opts, :newsgroups) == [] -> {:error, "at least one --group is required"}
-        Keyword.has_key?(opts, :repair_host) and not present?(opts, :check_host) ->
-          {:error, "--repair-host requires --check-host"}
-        true -> validate_values(opts)
-      end
+      with :ok <- validate_choice(opts, [:tls, :check_tls, :repair_tls],
+             %{"implicit" => :implicit, "starttls" => :starttls, "none" => :none}),
+           :ok <- validate_choice(opts, [:tls_verify, :check_tls_verify, :repair_tls_verify],
+             %{"peer" => :peer, "none" => :none}),
+           :ok <- validate_choice(opts, [:encoding],
+             %{"uuencode" => :uuencode, "yenc" => :yenc, "base64" => :base64}),
+           :ok <- validate_size(opts), do: :ok
     end
-  end
-
-  defp present?(opts, key) do
-    case Keyword.get(opts, key) do
-      value when is_binary(value) -> String.trim(value) != ""
-      _ -> false
-    end
-  end
-
-  defp validate_values(opts) do
-    positives = [:port, :connections, :check_port, :check_connections,
-                 :repair_port, :repair_connections, :reconnect_delay]
-
-    with :ok <- validate_positive(opts, positives),
-         :ok <- validate_choice(opts, [:tls, :check_tls, :repair_tls],
-                                %{"implicit" => :implicit, "starttls" => :starttls, "none" => :none}),
-         :ok <- validate_choice(opts, [:tls_verify, :check_tls_verify, :repair_tls_verify],
-                                %{"peer" => :peer, "none" => :none}),
-         :ok <- validate_choice(opts, [:encoding],
-                                %{"uuencode" => :uuencode, "yenc" => :yenc, "base64" => :base64}),
-         :ok <- validate_size(opts) do
-      :ok
-    end
-  end
-
-  defp validate_positive(opts, keys) do
-    Enum.reduce_while(keys, :ok, fn key, _ ->
-      case Keyword.fetch(opts, key) do
-        :error -> {:cont, :ok}
-        {:ok, n} when is_integer(n) and n > 0 -> {:cont, :ok}
-        _ -> {:halt, {:error, "--#{cli_name(key)} must be a positive integer"}}
-      end
-    end)
   end
 
   defp validate_choice(opts, keys, allowed) do
@@ -259,9 +224,28 @@ defmodule Geri.CLI do
         {:error, "verification or repair failed: #{verification_message(summary)}; repair errors: #{inspect(reasons)}"}
       {:error, {kind, reason, details}} when kind in [:upload_failed, :finalization_failed] ->
         {:error, "#{kind}: #{inspect(reason)}; upload key: #{details.upload_key}"}
+      {:error, {:invalid_option, key, reason}} ->
+        {:error, "--#{if(key == :newsgroups, do: "group", else: cli_name(key))} #{option_error(reason)}"}
+      {:error, :files_required} -> {:error, "at least one file is required"}
+      {:error, {:invalid_input, path, reason}} ->
+        {:error, "invalid input #{inspect(path)}: #{input_error(reason)}"}
+      {:error, {:file_stat_failed, path, reason}} ->
+        {:error, "cannot inspect input #{inspect(path)}: #{:file.format_error(reason)}"}
       {:error, reason} -> {:error, "upload failed: #{inspect(reason)}"}
     end
   end
+
+  defp input_error(:not_regular_file), do: "a regular file is required"
+  defp input_error(:empty_file), do: "the file is empty"
+  defp input_error(:path_required), do: "a filename is required"
+
+  defp option_error(:port_out_of_range), do: "must be an integer between 1 and 65535"
+  defp option_error(:positive_integer_required), do: "must be a positive integer"
+  defp option_error(:nonempty_text_required), do: "must be nonempty text without line breaks or NUL"
+  defp option_error(:nonempty_groups_required), do: "requires at least one nonempty group"
+  defp option_error(:checking_server_required), do: "requires --check-host"
+  defp option_error(:unsupported_value), do: "has an unsupported value"
+  defp option_error({:minimum_bytes, minimum}), do: "must be at least #{minimum} bytes for this encoding"
 
   defp verification_message(summary) do
     "upload key: #{summary.upload_key}; " <>

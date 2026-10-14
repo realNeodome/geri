@@ -20,15 +20,9 @@ defmodule Geri do
     |> Base.url_encode64(padding: false)
   end
 
-  def upload(paths, opts) when is_binary(paths) do
-    upload(
-      [paths],
-      opts
-    )
-  end
-
-  def upload(paths, opts) when is_list(paths) do
-    with {:ok, opts} <- Geri.Auth.resolve(opts),
+  def upload(paths, opts) do
+    with {:ok, paths, opts} <- Geri.Options.normalize(paths, opts),
+         {:ok, opts} <- Geri.Auth.resolve(opts),
          {:ok, opts} <- resolve_check_auth(opts),
          {:ok, opts} <- resolve_repair_auth(opts) do
       do_upload(
