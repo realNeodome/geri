@@ -168,6 +168,11 @@ Unresolved articles can be waiting for propagation checks; they are not
 necessarily failures. The inspection views do not themselves perform a new
 server check.
 
+Detailed verification accounting is retained while each file is being checked
+or repaired. Once that file finishes, its results are folded into upload-wide
+counters and successful part keys are discarded. Unresolved article details
+remain available in `Geri.JobState.failure_info(job)`.
+
 ## Raw job state
 
 For the internal representation:

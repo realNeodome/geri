@@ -150,7 +150,7 @@ defmodule Geri.Checker do
     {:noreply, state}
   end
 
-  def handle_info({:repair_finished, result}, state) do
+  def handle_info({:repair_finished, file_number, result}, state) do
     case result do
       :ok ->
         Logger.info("repair pass completed")
@@ -158,6 +158,8 @@ defmodule Geri.Checker do
       {:error, reason} ->
         Logger.error("repair pass failed: #{inspect(reason)}")
     end
+
+    :ok = Geri.JobState.finish_verification_file(state.job, file_number)
 
     state =
       state
@@ -315,6 +317,7 @@ defmodule Geri.Checker do
       state = %{state | files: Map.delete(state.files, item.file_number)}
 
       if missing == [] do
+        :ok = Geri.JobState.finish_verification_file(state.job, item.file_number)
         state
       else
         %{state | repairs: state.repairs ++ [Enum.reverse(missing)]}
@@ -345,7 +348,7 @@ defmodule Geri.Checker do
 
     pid = spawn_link(fn ->
       result = Geri.repair(items, state.job, repair_opts, article_opts)
-      send(parent, {:repair_finished, result})
+      send(parent, {:repair_finished, hd(items).file_number, result})
     end)
 
     %{state | repairing: true, repair_pid: pid, repairs: remaining}

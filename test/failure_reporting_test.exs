@@ -9,6 +9,7 @@ defmodule Geri.FailureReportingTest do
     nzb = Path.join(dir, "upload.nzb")
     opts = [from: "test@example.invalid", host: "localhost", newsgroups: ["test"], nzb: nzb]
     {:ok, job} = Geri.JobState.start_link("test-key", [path], opts)
+    Process.unlink(job)
 
     part = %{
       file_number: 1, file_total: 1, file_size: 5, filename: "source.bin",
@@ -28,6 +29,43 @@ defmodule Geri.FailureReportingTest do
     end)
 
     %{job: job, part: part, article: article, item: item, nzb: nzb, dir: dir, opts: opts}
+  end
+
+  test "duplicate and late results do not count progress twice", c do
+    Geri.JobState.set_checker(c.job, self())
+    Geri.JobState.check_present(c.job, c.item, 1)
+    Geri.JobState.check_present(c.job, c.item, 1)
+    before = Geri.JobState.snapshot(c.job)
+    assert :sys.get_state(c.job).ui.checked_bytes == 5
+    Geri.JobState.finish_verification_file(c.job, 1)
+    Geri.JobState.check_present(c.job, c.item, 1)
+    Geri.JobState.check_missing(c.job, c.item, 1)
+    Geri.JobState.check_not_found(c.job, c.item, 1)
+    Geri.JobState.repair_failed(c.job, c.item, 1, :late)
+    assert Geri.JobState.verification(c.job).confirmed == 1
+    assert Geri.JobState.failure_info(c.job).unresolved == []
+    after_snapshot = Geri.JobState.snapshot(c.job)
+    assert after_snapshot.activity == before.activity
+    assert :sys.get_state(c.job).ui.checked_bytes == 5
+  end
+
+  test "folding repaired and failed parts preserves the public result", c do
+    Geri.JobState.check_missing(c.job, c.item, 1)
+    Geri.JobState.repair_present(c.job, c.item, 1)
+    failed = %{c.item | part: 2}
+    Geri.JobState.check_missing(c.job, failed, 1)
+    Geri.JobState.repair_failed(c.job, failed, 1, :rejected)
+    before = Geri.JobState.result(c.job)
+    Geri.JobState.finish_verification_file(c.job, 1)
+    assert Geri.JobState.result(c.job) == before
+    assert :sys.get_state(c.job).verification.files == %{}
+    assert [%{part: 2, reason: :rejected}] = Geri.JobState.failure_info(c.job).unresolved
+  end
+
+  for outcome <- [:confirmed, :repaired, :repair_failed] do
+    test "checker automatically folds a file after #{outcome}", c do
+      assert_checker_folds(c, unquote(outcome))
+    end
   end
 
   test "successful posting and repair preserve the original success result", c do
@@ -180,5 +218,97 @@ defmodule Geri.FailureReportingTest do
     assert {:error, :cancelled} = Task.await(task, 1_000)
     GenServer.stop(checker)
     GenServer.stop(control)
+  end
+
+  defp assert_checker_folds(c, outcome) do
+    article_opts = Keyword.put(c.opts, :upload_key, "test-key")
+    part = Map.put(c.part, :body, Geri.Encoder.UUEncode.encode_part("hello", c.part.filename, 1, 1))
+    {:ok, article} = Geri.Article.build(part, article_opts)
+    item = %{c.item | message_id: article.message_id}
+    {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, packet: :line, ip: {127, 0, 0, 1}])
+    {:ok, {_address, port}} = :inet.sockname(listener)
+    parent = self()
+    server = Task.async(fn ->
+      {:ok, socket} = :gen_tcp.accept(listener, 2_000)
+      :ok = :gen_tcp.send(socket, "200 ready\r\n")
+      for _ <- 1..if(outcome == :confirmed, do: 1, else: 3) do
+        assert {:ok, "STAT " <> _} = :gen_tcp.recv(socket, 0, 2_000)
+        :ok = :gen_tcp.send(socket, if(outcome == :confirmed, do: "223 present\r\n", else: "430 missing\r\n"))
+      end
+      if outcome != :confirmed do
+        {:ok, repair} = :gen_tcp.accept(listener, 2_000)
+        :ok = :gen_tcp.send(repair, "200 ready\r\n")
+        assert {:ok, "POST\r\n"} = :gen_tcp.recv(repair, 0, 2_000)
+        send(parent, {:repair_waiting, self()})
+        receive do :continue -> :ok after 2_000 -> flunk("repair was not released") end
+        if outcome == :repaired do
+          :ok = :gen_tcp.send(repair, "340 send article\r\n")
+          drain_article(repair)
+          :ok = :gen_tcp.send(repair, "240 accepted\r\n")
+        else
+          :ok = :gen_tcp.send(repair, "440 posting denied\r\n")
+        end
+        :gen_tcp.close(repair)
+      end
+      receive do :stop -> :ok after 2_000 -> flunk("checker did not finish") end
+      :gen_tcp.close(socket)
+    end)
+    opts = [host: "127.0.0.1", port: port, tls: :none, connections: 1,
+      repair_opts: [host: "127.0.0.1", port: port, tls: :none, repair_connections: 1],
+      article_opts: article_opts]
+    {:ok, checker} = Geri.Checker.start_link(c.job, opts)
+    try do
+      :ok = Geri.Checker.enqueue(checker, item)
+      for _ <- 1..if(outcome == :confirmed, do: 1, else: 3), do: advance_check(checker)
+      if outcome != :confirmed do
+        assert_receive {:repair_waiting, pid}, 2_000
+        assert Map.has_key?(:sys.get_state(c.job).verification.files, 1)
+        assert Geri.JobState.verification(c.job).missing == 1
+        send(pid, :continue)
+      end
+      result = Geri.Checker.finish(checker)
+      assert :sys.get_state(c.job).verification.files == %{}
+      assert Geri.JobState.verification(c.job)[outcome] == 1
+      if outcome == :repair_failed do
+        assert {:error, {:verification_failed, details, []}} = result
+        assert [%{outcome: :repair_failed}] = details.unresolved
+      else
+        assert result == :ok
+        assert Geri.JobState.failure_info(c.job).unresolved == []
+      end
+      send(server.pid, :stop)
+      Task.await(server, 2_000)
+    after
+      GenServer.stop(checker)
+      :gen_tcp.close(listener)
+      if Process.alive?(server.pid), do: Task.shutdown(server, :brutal_kill)
+    end
+  end
+
+  defp drain_article(socket) do
+    case :gen_tcp.recv(socket, 0, 2_000) do
+      {:ok, ".\r\n"} -> :ok
+      {:ok, _line} -> drain_article(socket)
+      error -> flunk("article receive failed: #{inspect(error)}")
+    end
+  end
+
+  defp advance_check(checker) do
+    wait_for_check(checker, System.monotonic_time(:millisecond) + 2_000)
+    :sys.replace_state(checker, fn state ->
+      if state.timer, do: Process.cancel_timer(state.timer)
+      now = System.monotonic_time(:millisecond) - 1
+      entries = for {{_due, sequence}, item} <- :gb_trees.to_list(state.queue), do: {{now, sequence}, item}
+      %{state | queue: :gb_trees.from_orddict(Enum.sort(entries)), timer: nil}
+    end)
+    send(checker, :dispatch)
+  end
+
+  defp wait_for_check(checker, deadline) do
+    if :gb_trees.is_empty(:sys.get_state(checker).queue) do
+      assert System.monotonic_time(:millisecond) < deadline
+      Process.sleep(5)
+      wait_for_check(checker, deadline)
+    end
   end
 end

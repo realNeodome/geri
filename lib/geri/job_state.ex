@@ -59,6 +59,12 @@ defmodule Geri.JobState do
     GenServer.call(job, {:repair_failed, item, worker, reason}, :infinity)
   end
 
+  # Asynchronous because posting can be waiting on Checker.enqueue/2.
+  # Calls from the checker preserve ordering with its preceding result casts.
+  def finish_verification_file(job, number) do
+    GenServer.cast(job, {:finish_verification_file, number})
+  end
+
   def verification(job), do: GenServer.call(job, :verification, :infinity)
   def result(job, repair_errors \\ []), do: GenServer.call(job, {:result, repair_errors}, :infinity)
   def failure_info(job), do: GenServer.call(job, :failure_info, :infinity)
@@ -89,9 +95,7 @@ defmodule Geri.JobState do
         posting: posting_config(opts),
         checker: nil,
         control: nil,
-        verification: %{confirmed: MapSet.new(), missing: MapSet.new(),
-                        repaired: MapSet.new(), repair_failed: MapSet.new(),
-                        inconclusive: MapSet.new(), unresolved: %{}},
+        verification: Geri.Verification.new(),
         recovery: %{files: %{}, completed_files: 0},
         nzb: build_nzb_state(nzb, length(paths)),
         ui: %{
@@ -179,16 +183,13 @@ defmodule Geri.JobState do
   end
 
   def handle_call({:repair_present, item, worker}, _from, state) do
-    state = state
-      |> mark_repair_present(item, worker)
-      |> update_verification(:repaired, item)
+    state = record_verification(state, :repaired, item, &mark_repair_present(&1, item, worker))
     {:reply, :ok, state}
   end
 
   def handle_call({:repair_failed, item, worker, reason}, _from, state) do
-    state = state
-      |> add_repair_activity(:repair_failed, Map.put(item, :reason, reason), worker)
-      |> update_verification(:repair_failed, Map.put(item, :reason, reason))
+    item = Map.put(item, :reason, reason)
+    state = record_verification(state, :repair_failed, item, &add_repair_activity(&1, :repair_failed, item, worker))
     {:reply, :ok, state}
   end
 
@@ -221,42 +222,34 @@ defmodule Geri.JobState do
   end
 
   @impl true
+  def handle_cast({:finish_verification_file, number}, state) do
+    state = %{state | verification: Geri.Verification.finish_file(state.verification, number)}
+    {:noreply, state}
+  end
+
   def handle_cast({:check_present, item, checker}, state) do
-    state = state |> mark_check_present(item, checker) |> update_verification(:confirmed, item)
+    state = record_verification(state, :confirmed, item, &mark_check_present(&1, item, checker))
     {:noreply, state}
   end
 
   def handle_cast({:check_not_found, item, checker}, state) do
-    {:noreply, add_check_activity(state, :not_found, item, checker)}
+    state = if Geri.Verification.accepts?(state.verification, :missing, item),
+      do: add_check_activity(state, :not_found, item, checker), else: state
+    {:noreply, state}
   end
 
   def handle_cast({:check_missing, item, checker}, state) do
-    state = state |> add_check_activity(:missing, item, checker) |> update_verification(:missing, item)
+    state = record_verification(state, :missing, item, &add_check_activity(&1, :missing, item, checker))
     {:noreply, state}
   end
 
   def handle_cast({:check_inconclusive, item, checker, reason}, state) do
-    state =
-      add_check_activity(
-        state,
-        :inconclusive,
-        Map.put(item, :reason, reason),
-        checker
-      )
-
-    {:noreply, update_verification(state, :inconclusive, Map.put(item, :reason, reason))}
+    item = Map.put(item, :reason, reason)
+    state = record_verification(state, :inconclusive, item, &add_check_activity(&1, :inconclusive, item, checker))
+    {:noreply, state}
   end
 
-  defp verification_summary(state) do
-    v = state.verification
-    %{
-      confirmed: MapSet.size(v.confirmed),
-      missing: MapSet.size(MapSet.difference(v.missing, v.repaired)),
-      repaired: MapSet.size(v.repaired),
-      repair_failed: MapSet.size(v.repair_failed),
-      inconclusive: MapSet.size(v.inconclusive)
-    }
-  end
+  defp verification_summary(state), do: Geri.Verification.summary(state.verification)
 
   defp failure_details(state) do
     state
@@ -270,13 +263,14 @@ defmodule Geri.JobState do
   end
 
   defp update_verification(state, kind, item) do
-    key = {item.file_number, item.part}
-    state = if kind == :pending, do: state, else: update_in(state.verification[kind], &MapSet.put(&1, key))
+    %{state | verification: Geri.Verification.record(state.verification, kind, item)}
+  end
 
-    if kind in [:confirmed, :repaired] do
-      update_in(state.verification.unresolved, &Map.delete(&1, key))
+  defp record_verification(state, kind, item, activity) do
+    if Geri.Verification.accepts?(state.verification, kind, item) do
+      state |> activity.() |> update_verification(kind, item)
     else
-      update_in(state.verification.unresolved, &Map.put(&1, key, Map.put(item, :outcome, kind)))
+      state
     end
   end
 
