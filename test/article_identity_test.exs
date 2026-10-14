@@ -52,7 +52,7 @@ defmodule Geri.ArticleIdentityTest do
     rebuilt = Map.merge(rebuilt, %{file_number: 9, file_total: 20, subject: "different comment"})
 
     changed_headers =
-      Keyword.merge(@opts, from: "another@example.invalid", newsgroups: ["another"])
+      Keyword.merge(@opts, from: "another@example.invalid", name: "Géri 日本語", newsgroups: ["another"])
 
     assert article(part).message_id == article(rebuilt, changed_headers).message_id
   end

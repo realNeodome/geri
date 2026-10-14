@@ -85,7 +85,7 @@ defmodule Geri.JobState do
           file_total: length(paths),
           total_bytes: total_bytes,
           started_at: System.monotonic_time(:millisecond),
-          from: Keyword.fetch!(opts, :from),
+          from: Geri.Header.display_from(Keyword.fetch!(opts, :from), Keyword.get(opts, :name)),
           comment: Keyword.get(opts, :comment),
           connections: Keyword.get(opts, :connections, Geri.defaults()[:connections]),
           checking_server: checking_server_config(opts),
@@ -622,12 +622,12 @@ defmodule Geri.JobState do
       Map.get(
         state.nzb.pending_files,
         part.file_number,
-        new_nzb_file(state, part)
+        new_nzb_file(state, part, article)
       )
 
     subject =
       if part.part == 1 do
-        part.subject
+        Map.get(article, :subject) || part.subject
       else
         file.subject
       end
@@ -666,12 +666,12 @@ defmodule Geri.JobState do
     %{state | nzb: nzb}
   end
 
-  defp new_nzb_file(state, part) do
+  defp new_nzb_file(state, part, article) do
     %{
       file_number: part.file_number,
       filename: part.filename,
       total_parts: part.total,
-      poster: state.job.from,
+      poster: Map.get(article, :from) || state.job.from,
       date: System.system_time(:second),
       subject: nil,
       groups_used: MapSet.new(),

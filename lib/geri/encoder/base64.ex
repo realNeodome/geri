@@ -19,10 +19,10 @@ defmodule Geri.Encoder.Base64 do
 
   def stream_file(path, part_size) do
     with {:ok, effective_size} <- normalize_part_size(part_size),
-         {:ok, stat} <- File.stat(path),
-         :ok <- validate_file_size(stat.size),
          filename = Path.basename(path),
-         :ok <- validate_filename(filename) do
+         :ok <- Geri.Filename.validate(filename),
+         {:ok, stat} <- File.stat(path),
+         :ok <- validate_file_size(stat.size) do
       total = div(stat.size + effective_size - 1, effective_size)
 
       stream =
@@ -53,14 +53,6 @@ defmodule Geri.Encoder.Base64 do
 
   defp validate_file_size(_size) do
     :ok
-  end
-
-  defp validate_filename(filename) do
-    if String.contains?(filename, ["\r", "\n", <<0>>]) do
-      {:error, :invalid_filename}
-    else
-      :ok
-    end
   end
 
   defp chunks(<<>>, _size) do

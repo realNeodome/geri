@@ -84,7 +84,7 @@ if Code.ensure_loaded?(Geri.TUI) do
       File.write!(path, "hello")
       {:ok, job} = Geri.JobState.start_link("key", [path],
         host: "a.invalid", check_host: "b.invalid", repair_host: "c.invalid",
-        from: "Uploader <uploader@example.invalid>", newsgroups: ["test"])
+        from: "uploader@example.invalid", name: "Uploader", newsgroups: ["test"])
       snapshot = Geri.JobState.snapshot(job)
       GenServer.stop(job)
       File.rm!(path)
@@ -94,7 +94,7 @@ if Code.ensure_loaded?(Geri.TUI) do
     test "wide rows display all ABC endpoints and the complete From value", c do
       {line, text} = render_line(c.snapshot, 160)
       assert text =~ "server: a.invalid:563 // b.invalid:563 // c.invalid:563"
-      assert String.ends_with?(text, "from: Uploader <uploader@example.invalid>")
+      assert String.ends_with?(text, "from: \"Uploader\" <uploader@example.invalid>")
       assert String.length(text) == 160
       assert draw(line, 160) == text
     end

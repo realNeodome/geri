@@ -119,6 +119,14 @@ from the source directory after building the release. For interactive
 progress and controls, replace `--no-tui` with `--tui` in a build with TUI
 support. Run `geri --help` for all options.
 
+`--from` accepts a bare ASCII email address. Supply an optional display name
+separately with `--name`, for example `--from uploader@example.com --name 'Géri'`.
+Quoted addresses and combined name/address forms are not supported. Geri
+encodes Unicode sender names and Subjects as MIME headers and stores the same
+encoded values, unfolded and XML-escaped, in the NZB. UTF-8 filenames are
+preserved without renaming or normalization; invalid UTF-8, line breaks, and
+characters forbidden in XML are rejected before uploading.
+
 ### Simple upload
 
 Post files to server A and write an NZB:
@@ -126,7 +134,7 @@ Post files to server A and write an NZB:
 ```sh
 geri upload \
   --host news-a.example.com --tls implicit \
-  --from 'Uploader <uploader@example.com>' \
+  --from uploader@example.com --name 'Géri' \
   --group alt.binaries.test \
   --part-size 700K --connections 8 \
   --nzb upload.nzb --no-tui -- ./*.bin
@@ -142,7 +150,7 @@ server, so `--repair-host` is unnecessary here. B must permit posting.
 geri upload \
   --host news-a.example.com --tls implicit \
   --check-host news-b.example.com --check-tls implicit \
-  --from 'Uploader <uploader@example.com>' \
+  --from uploader@example.com --name 'Géri' \
   --group alt.binaries.test \
   --part-size 700K --connections 8 \
   --check-connections 2 --repair-connections 2 \
@@ -159,7 +167,7 @@ geri upload \
   --host news-a.example.com --tls implicit \
   --check-host news-b.example.com --check-tls implicit \
   --repair-host news-c.example.com --repair-tls implicit \
-  --from 'Uploader <uploader@example.com>' \
+  --from uploader@example.com --name 'Géri' \
   --group alt.binaries.test \
   --part-size 700K --connections 8 \
   --check-connections 2 --repair-connections 2 \

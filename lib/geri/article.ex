@@ -1,5 +1,5 @@
 defmodule Geri.Article do
-  defstruct [:message_id, :data]
+  defstruct [:message_id, :data, :from, :subject]
 
   def build(part, opts) do
     from = Keyword.fetch!(opts, :from)
@@ -10,9 +10,9 @@ defmodule Geri.Article do
         generate_message_id(part, opts)
       end)
 
-    with :ok <- validate_header(from),
+    with {:ok, from} <- Geri.Header.encode_from(from, Keyword.get(opts, :name)),
          {:ok, newsgroups} <- format_newsgroups(newsgroups),
-         :ok <- validate_header(part.subject),
+         {:ok, subject} <- Geri.Header.encode_subject(part.subject),
          :ok <- validate_header(message_id) do
       date =
         DateTime.utc_now()
@@ -22,7 +22,7 @@ defmodule Geri.Article do
         [
           "From: #{from}",
           "Newsgroups: #{newsgroups}",
-          "Subject: #{part.subject}",
+          "Subject: #{subject}",
           "Message-ID: #{message_id}",
           "Date: #{date}"
         ]
@@ -33,7 +33,9 @@ defmodule Geri.Article do
       {:ok,
        %__MODULE__{
          message_id: message_id,
-         data: data
+         data: data,
+         from: Geri.Header.unfold(from),
+         subject: Geri.Header.unfold(subject)
        }}
     end
   end

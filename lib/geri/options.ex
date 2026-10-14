@@ -18,6 +18,8 @@ defmodule Geri.Options do
            ),
          :ok <- text_option(opts, :host, true),
          :ok <- text_option(opts, :from, true),
+         :ok <- sender(opts),
+         :ok <- header_option(opts, :comment),
          :ok <- text_option(opts, :check_host, false),
          :ok <- text_option(opts, :repair_host, false),
          :ok <- repair_dependency(opts),
@@ -149,6 +151,21 @@ defmodule Geri.Options do
   defp inputs(_), do: {:error, :files_required}
 
   defp input(path) when is_binary(path) do
+    with :ok <- input_filename(path) do
+      input_stat(path)
+    end
+  end
+
+  defp input(path), do: {:error, {:invalid_input, path, :path_required}}
+
+  defp input_filename(path) do
+    case Geri.Filename.validate(Path.basename(path)) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:invalid_input, path, reason}}
+    end
+  end
+
+  defp input_stat(path) do
     case File.stat(path) do
       {:ok, %{type: :regular, size: size}} when size > 0 -> :ok
       {:ok, %{type: :regular}} -> {:error, {:invalid_input, path, :empty_file}}
@@ -157,7 +174,25 @@ defmodule Geri.Options do
     end
   end
 
-  defp input(path), do: {:error, {:invalid_input, path, :path_required}}
+  defp sender(opts) do
+    with :ok <- header_option(opts, :name) do
+      case Geri.Header.address(opts[:from]) do
+        :ok -> :ok
+        {:error, reason} -> invalid(:from, reason)
+      end
+    end
+  end
+
+  defp header_option(opts, key) do
+    case opts[key] do
+      nil -> :ok
+      value ->
+        case Geri.Header.text(value) do
+          :ok -> :ok
+          {:error, _} -> invalid(key, :header_text_required)
+        end
+    end
+  end
 
   defp default_port(:implicit), do: 563
   defp default_port(_), do: 119

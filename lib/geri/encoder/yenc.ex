@@ -3,10 +3,10 @@ defmodule Geri.Encoder.YEnc do
 
   def stream_file(path, part_size)
       when is_integer(part_size) and part_size > 0 do
-    with {:ok, stat} <- File.stat(path),
-         :ok <- validate_file_size(stat.size),
-         filename = Path.basename(path),
-         :ok <- validate_filename(filename) do
+    with filename = Path.basename(path),
+         :ok <- Geri.Filename.validate(filename),
+         {:ok, stat} <- File.stat(path),
+         :ok <- validate_file_size(stat.size) do
       total =
         div(
           stat.size + part_size - 1,
@@ -225,14 +225,4 @@ defmodule Geri.Encoder.YEnc do
     :ok
   end
 
-  defp validate_filename(filename) do
-    if String.contains?(
-         filename,
-         ["\r", "\n", <<0>>]
-       ) do
-      {:error, :invalid_filename}
-    else
-      :ok
-    end
-  end
 end

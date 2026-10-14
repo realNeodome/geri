@@ -4,7 +4,7 @@ defmodule Geri.CLI do
   @switches [
     host: :string, port: :integer, tls: :string, tls_verify: :string,
     tls_ca_file: :string, username: :string, auth_file: :string,
-    from: :string, group: :keep, encoding: :string, part_size: :string,
+    from: :string, name: :string, group: :keep, encoding: :string, part_size: :string,
     connections: :integer, comment: :string, nzb: :string,
     upload_key: :string, reader: :boolean,
     check_host: :string, check_port: :integer, check_tls: :string,
@@ -34,7 +34,8 @@ defmodule Geri.CLI do
     --username USER          Posting username
     --auth-file FILE         Authentication file (default ~/.authinfo or ~/.netrc)
     --reader / --no-reader   Reader mode
-    --from ADDRESS           From header (required)
+    --from ADDRESS           Bare email address (required)
+    --name NAME              Sender display name (optional)
     --group GROUP            Newsgroup (repeatable, required)
     --encoding TYPE          yenc | uuencode | base64 (default yenc)
     --part-size SIZE         Bytes or K/M/G suffix (1024-based)
@@ -237,8 +238,11 @@ defmodule Geri.CLI do
 
   defp input_error(:not_regular_file), do: "a regular file is required"
   defp input_error(:empty_file), do: "the file is empty"
+  defp input_error(:invalid_filename), do: "the filename must be valid UTF-8 without line breaks or characters forbidden in XML"
   defp input_error(:path_required), do: "a filename is required"
 
+  defp option_error(:email_address_required), do: "expects a bare ASCII email address; use --from \"geri@example.com\" --name \"Géri\""
+  defp option_error(:header_text_required), do: "must be UTF-8 text without line breaks or NUL"
   defp option_error(:port_out_of_range), do: "must be an integer between 1 and 65535"
   defp option_error(:positive_integer_required), do: "must be a positive integer"
   defp option_error(:nonempty_text_required), do: "must be nonempty text without line breaks or NUL"
