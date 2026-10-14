@@ -178,60 +178,86 @@ defmodule Geri do
          connections,
          opts
        ) do
-    producer =
-      Task.async(fn ->
-        try do
-          produce(queue, job, paths, opts)
-        rescue
-          error in Geri.Encoder.Source.SizeChangedError ->
-            reason = {:source_size_changed, error.path, error.expected_size, error.actual_size}
-            Geri.Queue.abort(queue, reason)
-            {:error, reason}
+    run_batch(queue, job, connections, opts, :posting, fn ->
+      try do
+        produce(queue, job, paths, opts)
+      rescue
+        error in Geri.Encoder.Source.SizeChangedError ->
+          reason = {:source_size_changed, error.path, error.expected_size, error.actual_size}
+          {:error, reason}
 
-          error in File.Error ->
-            reason = {:file_read_failed, error.path, error.reason}
-            Geri.Queue.abort(queue, reason)
-            {:error, reason}
-        end
-      end)
+        error in File.Error ->
+          reason = {:file_read_failed, error.path, error.reason}
+          {:error, reason}
+      end
+    end)
+  end
+
+  defp run_batch(queue, job, connections, opts, role, produce) do
+    producer = Task.async(fn -> finish_production(queue, produce.()) end)
 
     workers =
       for worker <- 1..connections do
-        Task.async(fn ->
-          post_worker(
-            queue,
-            job,
-            worker,
-            opts
-          )
-        end)
+        Task.async(fn -> posting_worker(queue, job, worker, opts, role) end)
       end
 
-    Geri.Control.put_context(opts[:control], %{producer: producer.pid, workers: Enum.map(workers, & &1.pid)})
+    if role == :posting do
+      Geri.Control.put_context(opts[:control], %{
+        producer: producer.pid,
+        workers: Enum.map(workers, & &1.pid)
+      })
+    end
 
-    pending = Map.new([producer | workers], &{&1.ref, &1.pid})
-    await_upload(pending, opts[:control], :ok)
+    pending = Map.new([producer | workers], &{&1.ref, &1})
+    await_batch(pending, opts[:control], role, :ok)
   end
 
-  defp await_upload(pending, _control, result) when map_size(pending) == 0, do: result
-  defp await_upload(pending, control, result) do
+  defp finish_production(queue, :ok), do: Geri.Queue.close(queue)
+
+  defp finish_production(queue, {:error, reason} = error) do
+    Geri.Queue.abort(queue, reason)
+    error
+  end
+
+  defp await_batch(pending, _control, _role, result) when map_size(pending) == 0, do: result
+
+  defp await_batch(pending, control, role, result) do
     receive do
       {ref, task_result} when is_map_key(pending, ref) ->
         Process.demonitor(ref, [:flush])
-        result =
-          case {result, task_result} do
-            {:ok, {:error, _} = error} ->
-              # Cancel before waiting for peers, retaining the original failure.
-              Geri.Control.cancel(control)
-              error
+        pending = Map.delete(pending, ref)
 
-            _ -> result
-          end
-        await_upload(Map.delete(pending, ref), control, result)
+        case {result, task_result} do
+          {:ok, {:error, _} = error} ->
+            stop_batch(pending, control, role, error)
+
+          _ ->
+            await_batch(pending, control, role, result)
+        end
 
       {:DOWN, ref, :process, _pid, reason} when is_map_key(pending, ref) ->
         exit({:upload_task_exited, reason})
     end
+  end
+
+  defp stop_batch(pending, control, :posting, error) do
+    Geri.Control.cancel(control)
+    await_batch(pending, control, :posting, error)
+  end
+
+  defp stop_batch(pending, control, :repair, {:error, :cancelled} = error) do
+    # User cancellation retains Control's grace period for active operations.
+    await_batch(pending, control, :repair, error)
+  end
+
+  defp stop_batch(pending, _control, :repair, error) do
+    # A repair batch shares the upload's pause/cancel coordinator. Stop only
+    # this batch's tasks; cancelling Control would also stop initial posting
+    # and replace the repair failure with a user-cancellation outcome.
+    # Task shutdown waits for each worker's death; owned sockets/files close
+    # and Control's process monitors remove their actor registrations.
+    Enum.each(pending, fn {_ref, task} -> Task.shutdown(task, :brutal_kill) end)
+    error
   end
 
   defp produce(
@@ -243,45 +269,27 @@ defmodule Geri do
     file_total =
       length(paths)
 
-    result =
-      paths
-      |> Enum.with_index(1)
-      |> Enum.reduce_while(
-        :ok,
-        fn {path, file_number}, :ok ->
-          case produce_file(
-                 queue,
-                 job,
-                 path,
-                 file_number,
-                 file_total,
-                 opts
-               ) do
-            :ok ->
-              {:cont, :ok}
+    paths
+    |> Enum.with_index(1)
+    |> Enum.reduce_while(
+      :ok,
+      fn {path, file_number}, :ok ->
+        case produce_file(
+               queue,
+               job,
+               path,
+               file_number,
+               file_total,
+               opts
+             ) do
+          :ok ->
+            {:cont, :ok}
 
-            {:error, _reason} = error ->
-              {:halt, error}
-          end
+          {:error, _reason} = error ->
+            {:halt, error}
         end
-      )
-
-    case result do
-      :ok ->
-        Geri.Queue.close(
-          queue
-        )
-
-        :ok
-
-      {:error, reason} = error ->
-        Geri.Queue.abort(
-          queue,
-          reason
-        )
-
-        error
-    end
+      end
+    )
   end
 
   defp produce_file(
@@ -359,24 +367,16 @@ defmodule Geri do
     end
   end
 
-  defp post_worker(
-         queue,
-         job,
-         worker,
-         opts
-       ) do
-    worker_opts =
-      Keyword.put(
-        opts,
-        :worker,
-        worker
-      )
+  defp posting_worker(queue, job, worker, opts, role) do
+    label = if role == :repair, do: "R#{worker}", else: worker
+    opts = Keyword.put(opts, :worker, label)
 
     try do
-      case post_loop(queue, job, nil, worker, worker_opts) do
+      case posting_loop(queue, job, nil, worker, opts, role) do
         {:ok, conn} ->
           Geri.NNTP.quit(conn)
           :ok
+
         {:error, reason, conn} ->
           Geri.NNTP.quit(conn)
           {:error, reason}
@@ -386,99 +386,78 @@ defmodule Geri do
     end
   end
 
-  defp post_loop(
-         queue,
-         job,
-         conn,
-         worker,
-         opts
-       ) do
-    case Geri.Queue.next(
-           queue
-         ) do
-      {:ok, {part, article}} ->
-        case controlled_post(
-               conn,
-               part,
-               article,
-               worker,
-               opts
-             ) do
+  defp posting_loop(queue, job, conn, worker, opts, role) do
+    case Geri.Queue.next(queue) do
+      {:ok, queued} ->
+        {part, article, item} = posting_item(role, queued)
+
+        case controlled_post(conn, part, article, opts[:worker], opts, role == :posting) do
           {:ok, conn} ->
-            groups =
-              opts
-              |> Keyword.fetch!(
-                :newsgroups
-              )
-              |> normalize_groups()
-
-            case Geri.JobState.complete_part(
-                   job,
-                   part,
-                   article,
-                   groups,
-                   worker
-                 ) do
+            case record_post(role, job, part, article, item, worker, opts) do
               :ok ->
-                Logger.info(
-                  "worker #{worker} completed " <>
-                    "#{article.message_id} #{part.subject}"
-                )
-
-                post_loop(
-                  queue,
-                  job,
-                  conn,
-                  worker,
-                  opts
-                )
+                posting_loop(queue, job, conn, worker, opts, role)
 
               {:error, reason} ->
-                Logger.error(
-                  "worker #{worker} failed updating job state " <>
-                    "#{article.message_id}: " <>
-                    "#{inspect(reason)}"
-                )
-
-                Geri.Queue.abort(
-                  queue,
-                  reason
-                )
-
-                {:error,
-                 reason,
-                 conn}
+                Geri.Queue.abort(queue, reason)
+                {:error, reason, conn}
             end
 
           {:error, reason, conn} ->
-            Logger.error(
-              "worker #{worker} failed posting " <>
-                "#{article.message_id}: " <>
-                "#{inspect(reason)}"
-            )
+            case record_post_failure(role, job, item, article, worker, reason) do
+              :ok ->
+                posting_loop(queue, job, conn, worker, opts, role)
 
-            Geri.Queue.abort(
-              queue,
-              reason
-            )
-
-            {:error,
-             reason,
-             conn}
+              {:error, reason} ->
+                Geri.Queue.abort(queue, reason)
+                {:error, reason, conn}
+            end
         end
 
       :done ->
-        Logger.debug(
-          "worker #{worker} finished"
-        )
-
+        Logger.debug("worker #{opts[:worker]} finished")
         {:ok, conn}
 
       {:error, reason} ->
-        {:error,
-         reason,
-         conn}
+        {:error, reason, conn}
     end
+  end
+
+  defp posting_item(:posting, {part, article}), do: {part, article, nil}
+  defp posting_item(:repair, {item, part, article}), do: {part, article, item}
+
+  defp record_post(:posting, job, part, article, _item, worker, opts) do
+    groups = opts |> Keyword.fetch!(:newsgroups) |> normalize_groups()
+
+    case Geri.JobState.complete_part(job, part, article, groups, worker) do
+      :ok ->
+        Logger.info("worker #{worker} completed #{article.message_id} #{part.subject}")
+        :ok
+
+      {:error, reason} = error ->
+        Logger.error(
+          "worker #{worker} failed updating job state #{article.message_id}: #{inspect(reason)}"
+        )
+
+        error
+    end
+  end
+
+  defp record_post(:repair, job, part, article, item, worker, _opts) do
+    :ok = Geri.JobState.repair_present(job, item, worker)
+    Logger.info("repair worker #{worker} completed #{article.message_id} #{part.subject}")
+    :ok
+  end
+
+  defp record_post_failure(_role, _job, _item, _article, _worker, :cancelled),
+    do: {:error, :cancelled}
+
+  defp record_post_failure(:posting, _job, _item, article, worker, reason) do
+    Logger.error("worker #{worker} failed posting #{article.message_id}: #{inspect(reason)}")
+    {:error, reason}
+  end
+
+  defp record_post_failure(:repair, job, item, _article, worker, reason) do
+    Geri.JobState.repair_failed(job, item, worker, reason)
   end
 
   defp post_with_recovery(
@@ -569,7 +548,7 @@ defmodule Geri do
     end
   end
 
-  defp controlled_post(conn, part, article, worker, opts, preflight \\ true) do
+  defp controlled_post(conn, part, article, worker, opts, preflight) do
     network_step(conn, opts, fn conn ->
       if preflight do
         upload_part(conn, part, article, worker, opts)
@@ -897,62 +876,27 @@ defmodule Geri do
     with :ok <- validate_connections(connections),
          {:ok, queue} <- Geri.Queue.start_link(connections * 2) do
       if repair_opts[:control], do: Geri.Control.register_queue(repair_opts[:control], queue)
-      producer =
-        Task.async(fn ->
-          produce_repairs(
-            queue,
-            items,
-            article_opts
-          )
+      try do
+        run_batch(queue, job, connections, repair_opts, :repair, fn ->
+          produce_repairs(queue, items, article_opts)
         end)
-
-      workers =
-        for worker <- 1..connections do
-          Task.async(fn ->
-            repair_worker(
-              queue,
-              job,
-              worker,
-              repair_opts
-            )
-          end)
-        end
-
-      results =
-        [producer | workers]
-        |> Task.await_many(:infinity)
-
-      GenServer.stop(queue)
-
-      case Enum.find(results, &match?({:error, _}, &1)) do
-        nil -> :ok
-        error -> error
+      after
+        GenServer.stop(queue)
       end
     end
   end
 
   defp produce_repairs(queue, items, article_opts) do
-    result =
-      items
-      |> Enum.group_by(& &1.path)
-      |> Enum.reduce_while(:ok, fn {_path, file_items}, :ok ->
-        file_items = Enum.sort_by(file_items, & &1.offset)
+    items
+    |> Enum.group_by(& &1.path)
+    |> Enum.reduce_while(:ok, fn {_path, file_items}, :ok ->
+      file_items = Enum.sort_by(file_items, & &1.offset)
 
-        case produce_repair_file(queue, file_items, article_opts) do
-          :ok -> {:cont, :ok}
-          {:error, _reason} = error -> {:halt, error}
-        end
-      end)
-
-    case result do
-      :ok ->
-        Geri.Queue.close(queue)
-        :ok
-
-      {:error, reason} = error ->
-        Geri.Queue.abort(queue, reason)
-        error
-    end
+      case produce_repair_file(queue, file_items, article_opts) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
   end
 
   defp produce_repair_file(queue, [first | _] = items, article_opts) do
@@ -1070,51 +1014,6 @@ defmodule Geri do
           item.part_total
         )
     })
-  end
-
-  defp repair_worker(queue, job, worker, opts) do
-    worker_opts = Keyword.put(opts, :worker, "R#{worker}")
-
-    try do
-      case repair_loop(queue, job, nil, worker, worker_opts) do
-        {:ok, conn} ->
-          Geri.NNTP.quit(conn)
-          :ok
-        {:error, reason, conn} ->
-          Geri.NNTP.quit(conn)
-          {:error, reason}
-      end
-    after
-      Geri.Control.release(opts[:control])
-    end
-  end
-
-  defp repair_loop(queue, job, conn, worker, opts) do
-    case Geri.Queue.next(queue) do
-      {:ok, {item, part, article}} ->
-        case controlled_post(conn, part, article, "R#{worker}", opts, false) do
-          {:ok, conn} ->
-            Geri.JobState.repair_present(job, item, worker)
-            Logger.info(
-              "repair worker #{worker} completed #{article.message_id} #{part.subject}"
-            )
-            repair_loop(queue, job, conn, worker, opts)
-
-          {:error, reason, conn} ->
-            if reason == :cancelled do
-              {:error, :cancelled, conn}
-            else
-              Geri.JobState.repair_failed(job, item, worker, reason)
-              repair_loop(queue, job, conn, worker, opts)
-            end
-        end
-
-      :done ->
-        {:ok, conn}
-
-      {:error, reason} ->
-        {:error, reason, conn}
-    end
   end
 
   defp verify_repair_source(binary, item) do
