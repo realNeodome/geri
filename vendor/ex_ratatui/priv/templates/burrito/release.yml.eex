@@ -1,0 +1,83 @@
+name: Release
+
+# Builds <%= @app %> as a native single-file binary on each supported OS/arch
+# and uploads the artifacts to the matching GitHub Release on tag push.
+#
+# Each runner builds only its own target via BURRITO_TARGET. macOS and
+# Windows binaries are unsigned by default — see the Packaging with
+# Burrito guide for codesigning / notarization.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.target }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+
+    permissions:
+      contents: write
+
+    defaults:
+      run:
+        shell: bash
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux
+            artifact: <%= @app %>_linux
+            # Burrito's linux wrapper uses a musl runtime, so the bundled
+            # NIF must be the musl variant even when building on glibc.
+            target_abi: musl
+          - os: macos-15-intel
+            target: macos
+            artifact: <%= @app %>_macos
+          - os: macos-14
+            target: macos_silicon
+            artifact: <%= @app %>_macos_silicon
+          - os: windows-latest
+            target: windows
+            artifact: <%= @app %>_windows.exe
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28.2"
+          elixir-version: "1.18"
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Get deps
+        run: mix deps.get
+
+      - name: Build release
+        env:
+          BURRITO_TARGET: ${{ matrix.target }}
+          MIX_ENV: prod
+          MATRIX_TARGET_ABI: ${{ matrix.target_abi }}
+        run: |
+          # Only export TARGET_ABI when set — empty string is truthy in
+          # rustler_precompiled and produces a broken triple.
+          if [ -n "${MATRIX_TARGET_ABI}" ]; then
+            export TARGET_ABI="${MATRIX_TARGET_ABI}"
+          fi
+          mix release --overwrite
+
+      - name: Smoke test --version
+        run: ./burrito_out/${{ matrix.artifact }} --version
+
+      - uses: softprops/action-gh-release@v3
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          files: burrito_out/${{ matrix.artifact }}

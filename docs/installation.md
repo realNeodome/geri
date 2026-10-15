@@ -30,10 +30,32 @@ cd geri
 mix local.hex --force
 ```
 
-Fetching dependencies requires network access. A build with TUI support
-also requires ExRatatui's native Ratatui library, either as a precompiled
-binary for your platform or built from source. If it is unavailable, use
-the headless installation below.
+Fetching dependencies requires network access. TUI builds compile a bundled
+copy of ExRatatui 0.14.0 with a small width-measurement extension. This lets
+layout and truncation use the same Unicode rules as the renderer. Upstream
+precompiled binaries do not include that extension.
+
+Install a current stable Rust toolchain (including Cargo) and a C/C++ compiler.
+On macOS:
+
+```sh
+brew install rust
+# If the Xcode Command Line Tools are not installed:
+xcode-select --install
+```
+
+On FreeBSD, `pkg install rust` supplies Rust and Cargo; the base system
+provides the C/C++ compiler. On other systems, use the
+[Rust installation instructions](https://www.rust-lang.org/tools/install)
+and your platform's compiler tools. Check with `cargo --version` and
+`cc --version`. A separate Gleam installation is not needed.
+
+The first native build downloads Rust crates and can take several minutes.
+Keep `_build` and the native build cache for subsequent updates: changing
+only Geri normally recompiles Geri while Cargo reuses the native library.
+Changing the bundled native source, toolchain, build profile, or target may
+require rebuilding it. Installed releases need no Rust toolchain to run.
+For a build without native dependencies, use the headless installation below.
 
 ## Build and install with the TUI
 

@@ -3,6 +3,7 @@ if System.get_env("GERI_TUI") != "false" do
     use ExRatatui.App
 
     alias ExRatatui.Layout.Rect
+    alias Geri.TUI.Text
     alias ExRatatui.Style
     alias ExRatatui.Text.{Line, Span}
     alias ExRatatui.Widgets.{Block, List, Paragraph}
@@ -296,7 +297,7 @@ if System.get_env("GERI_TUI") != "false" do
         file_names
         |> fit_file_names(file_names_more, available)
 
-      Line.new(prefix ++ value_spans)
+      Line.new(truncate_spans(prefix ++ value_spans, width))
     end
 
     defp fit_file_names([], _more, _width), do: []
@@ -330,7 +331,7 @@ if System.get_env("GERI_TUI") != "false" do
           {[], 0, 0},
           fn name, {shown, used, processed} ->
             separator_width = if shown == [], do: 0, else: 2
-            candidate_used = used + separator_width + String.length(name)
+            candidate_used = used + separator_width + Text.width(name)
             names_left = processed + 1 < total
             needs_ellipsis = names_left or more_after_snapshot
             ellipsis_width = if needs_ellipsis, do: 5, else: 0
@@ -425,7 +426,7 @@ if System.get_env("GERI_TUI") != "false" do
 
     defp separator_line(title, width) do
       title_text = fit(" #{title} ", max(width - 2, 0))
-      remaining = max(width - 2 - String.length(title_text), 0)
+      remaining = max(width - 2 - Text.width(title_text), 0)
 
       Line.new([
         Span.new("├", style: @frame_style),
@@ -447,9 +448,9 @@ if System.get_env("GERI_TUI") != "false" do
       available = max(width - 2, 0)
       prefix_width = String.length(" total - ETA ")
       eta = fit(eta, max(available - prefix_width, 0))
-      remaining = max(available - prefix_width - String.length(eta), 0)
+      remaining = max(available - prefix_width - Text.width(eta), 0)
 
-      Line.new([
+      [
         Span.new("├", style: @frame_style),
         Span.new(" total ", style: @title_style),
         Span.new("-", style: @frame_style),
@@ -459,7 +460,9 @@ if System.get_env("GERI_TUI") != "false" do
         Span.new(eta, style: @eta_value_style),
         Span.new(String.duplicate("─", remaining), style: @frame_style),
         Span.new("┤", style: @frame_style)
-      ])
+      ]
+      |> truncate_spans(width, &Text.take/2)
+      |> Line.new()
     end
 
     defp activity(snapshot, width) do
@@ -789,7 +792,7 @@ if System.get_env("GERI_TUI") != "false" do
 
     defp spans_width(spans) do
       Enum.reduce(spans, 0, fn span, width ->
-        width + String.length(span.content)
+        width + Text.width(span.content)
       end)
     end
 
@@ -799,7 +802,7 @@ if System.get_env("GERI_TUI") != "false" do
     defp truncate_spans(spans, width, truncate) do
       {result, _remaining} =
         Enum.reduce_while(spans, {[], width}, fn span, {result, remaining} ->
-          length = String.length(span.content)
+          length = Text.width(span.content)
 
           cond do
             length <= remaining ->
@@ -833,33 +836,14 @@ if System.get_env("GERI_TUI") != "false" do
         ellipsis_width = min(3, width)
         content_width = max(width - ellipsis_width, 0)
 
-        truncate_spans(spans, content_width, &String.slice(&1, 0, &2)) ++
+        truncate_spans(spans, content_width, &Text.take/2) ++
           [Span.new(String.duplicate(".", ellipsis_width), style: @server_separator_style)]
       end
     end
 
-    defp fit(_text, width) when width <= 0, do: ""
+    defp fit(text, width), do: Text.fit(text, width)
 
-    defp fit(text, width) do
-      cond do
-        String.length(text) <= width ->
-          text
-
-        width <= 3 ->
-          String.slice(text, 0, width)
-
-        true ->
-          String.slice(text, 0, width - 3) <> "..."
-      end
-    end
-
-    defp pad_right(text, width) do
-      text <>
-        String.duplicate(
-          " ",
-          max(width - String.length(text), 0)
-        )
-    end
+    defp pad_right(text, width), do: Text.pad_right(text, width)
 
     defp ratio(_current, total) when total in [nil, 0], do: 0.0
 

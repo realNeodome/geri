@@ -1,0 +1,14 @@
+Bundled from the Hex package ex_ratatui 0.14.0 (MIT; see LICENSE).
+Upstream: https://github.com/mcass19/ex_ratatui
+
+Local changes:
+- Native.text_widths/1 accepts a list of strings and returns their widths via
+  Span::styled_graphemes() and CellWidth::cell_width(), the same filtering
+  and width calculation used by Paragraph rendering. Geri passes complete graphemes to match renderer behavior.
+- The corresponding Elixir NIF dispatch entry is registered in native.ex.
+
+Geri config forces a source build because upstream precompiled binaries do
+not contain this extension. Cargo.lock is retained. Rustler/Cargo reuse their
+normal incremental caches; updating Geri does not require a clean native build.
+This source copy makes the extension reproducible without a remote fork or
+patching downloaded Hex packages. No upstream precompiled binary is bundled.

@@ -30,11 +30,17 @@ Check your installation with `elixir --version`.
 Install Git if needed, then download Geri and set up Hex, Mix's package manager:
 
 ```sh
-brew install git
+brew install git rust
 git clone https://github.com/realNeodome/geri.git
 cd geri
 mix local.hex --force
 ```
+
+The TUI build also requires Rust/Cargo and a C/C++ compiler (on macOS, the
+Xcode Command Line Tools). Geri bundles a small ExRatatui extension so layout
+uses the renderer's own Unicode width calculation. Its first native build
+can take several minutes; later builds reuse Cargo's cache. Headless builds
+do not require Rust.
 
 Fetch the application dependencies, build the release, and install:
 

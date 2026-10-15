@@ -22,6 +22,8 @@ defmodule Geri.MixProject do
   defp tui?, do: System.get_env("GERI_TUI") != "false"
 
   defp deps do
-    if tui?(), do: [{:ex_ratatui, "~> 0.14.0"}], else: []
+    if tui?(),
+      do: [{:ex_ratatui, path: "vendor/ex_ratatui"}, {:rustler, "~> 0.38.0", runtime: false}],
+      else: []
   end
 end

@@ -1,0 +1,41 @@
+[package]
+name = "ex_ratatui"
+version = "0.14.0"
+authors = ["mcass19"]
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rustler = { version = "0.38.0", default-features = false, features = ["derive"] }
+ratatui = "0.30"
+crossterm = "0.29"
+time = "0.3"
+throbber-widgets-tui = "0.11"
+ratatui-textarea = "0.9"
+tui-markdown = "0.3"
+unicode-width = "0.2"
+vte = "0.15"
+ratatui-image = { version = "11.0.2", default-features = false, features = ["crossterm"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+tui-big-text = "0.8.4"
+syntect = "5"
+render3d = { path = "vendor/render3d", default-features = false }
+ratatui-3d = { path = "vendor/ratatui-3d", default-features = false }
+
+[build-dependencies]
+cc = "1"
+
+[features]
+default = ["nif_version_2_16"]
+nif_version_2_16 = ["rustler/nif_version_2_16"]
+nif_version_2_17 = ["rustler/nif_version_2_17"]
+
+# Size-tuned release profile for the precompiled artifacts. `opt-level` stays
+# at the default 3: "s"/"z" shrink further but de-prioritize the hot paths
+# (3D rasterizer, image decode, sixel quantization).
+[profile.release]
+strip = "symbols"
+lto = true
+codegen-units = 1

@@ -1,5 +1,6 @@
 if System.get_env("GERI_TUI") != "false" do
   defmodule Geri.TUI.ProgressBar do
+    alias Geri.TUI.Text
     alias ExRatatui.Style
     alias ExRatatui.Text.{Line, Span}
     alias ExRatatui.Widgets.Paragraph
@@ -141,29 +142,25 @@ if System.get_env("GERI_TUI") != "false" do
            label,
            regions
          ) do
-      spans =
-        regions
-        |> Enum.flat_map(fn {from, to, style} ->
-          length =
-            max(
-              to - from,
-              0
-            )
+      {graphemes, _column} =
+        label
+        |> Text.graphemes()
+        |> Enum.map_reduce(0, fn {grapheme, width}, column ->
+          # A wide glyph has one style. If it straddles a color boundary,
+          # retain the style of its leading cell rather than splitting it.
+          {_, _, style} =
+            Enum.find(regions, fn {from, to, _} -> column >= from and column < to end) ||
+              List.last(regions)
 
-          if length == 0 do
-            []
-          else
-            [
-              Span.new(
-                String.slice(
-                  label,
-                  from,
-                  length
-                ),
-                style: style
-              )
-            ]
-          end
+          {{grapheme, style}, column + width}
+        end)
+
+      spans =
+        graphemes
+        |> Enum.chunk_by(fn {_, style} -> style end)
+        |> Enum.map(fn chunk ->
+          {_, style} = hd(chunk)
+          Span.new(Enum.map_join(chunk, fn {text, _} -> text end), style: style)
         end)
 
       Line.new(spans)
@@ -183,7 +180,7 @@ if System.get_env("GERI_TUI") != "false" do
         max(
           div(
             width -
-              String.length(label),
+              Text.width(label),
             2
           ),
           0
@@ -193,7 +190,7 @@ if System.get_env("GERI_TUI") != "false" do
         max(
           width -
             left -
-            String.length(label),
+            Text.width(label),
           0
         )
 
@@ -225,36 +222,6 @@ if System.get_env("GERI_TUI") != "false" do
       |> min(1.0)
     end
 
-    defp fit(
-           _text,
-           width
-         )
-         when width <= 0 do
-      ""
-    end
-
-    defp fit(
-           text,
-           width
-         ) do
-      cond do
-        String.length(text) <= width ->
-          text
-
-        width <= 3 ->
-          String.slice(
-            text,
-            0,
-            width
-          )
-
-        true ->
-          String.slice(
-            text,
-            0,
-            width - 3
-          ) <> "..."
-      end
-    end
+    defp fit(text, width), do: Text.fit(text, width)
   end
 end
