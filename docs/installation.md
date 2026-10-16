@@ -218,3 +218,35 @@ sudo rm -r /usr/local/lib/geri
 
 For a personal installation, use the corresponding `$HOME/.local` paths
 without `sudo`.
+
+## Versioning
+
+The build obtains its version from Git and stores it in the application's
+release metadata. Installed copies need neither Git nor the source checkout;
+`geri --version` always reports the version of the installed build. Rebuild
+and reinstall after committing changes or creating a tag to refresh it.
+Git tags appear on GitHub after being pushed; they do not automatically create
+a GitHub Release page.
+
+To mark a release, first commit the intended source, then create and push its
+annotated tag (choose the appropriate version):
+
+```sh
+git tag -a v0.1.0 -m "Geri 0.1.0"
+git push origin v0.1.0
+```
+
+Only tags of the form `vMAJOR.MINOR.PATCH` are supported. Git describes the
+nearest matching tag in history: an exact tag produces `0.1.0`, and five
+commits after it produces `0.1.0+5.gabcdef0`. Tracked changes add `.dirty`,
+or `+dirty` at an exact tag. Untracked files are not included in that check.
+Without a matching tag, the base version in `mix.exs` is followed by the hash.
+Shallow clones may lack the relevant tag or history; fetch them before building
+if you want the same description as a full checkout.
+
+Our prepared source ZIPs include a `SOURCE_VERSION` stamp so builds without
+`.git` retain their source identity. GitHub-generated source downloads do not
+include that generated stamp and fall back to the base version in `mix.exs`.
+A valid Git checkout takes precedence over a stamp. Without Git information or
+a valid stamp, builds use the base version. Changes to an extracted archive
+cannot be detected by Git; its stamp identifies the archive as supplied.

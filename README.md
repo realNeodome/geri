@@ -255,6 +255,16 @@ NZB output requires a filesystem that supports hard links. Geri creates
 existing destination. On normal success, `.part` is removed. If publication
 fails, Geri reports a finalization error and retains the completed `.part`.
 
+## Version
+
+`geri --version` reports the source version captured when building the release.
+Release tags use `vMAJOR.MINOR.PATCH`: tag `v0.1.0` builds as `0.1.0`;
+five commits later it builds as `0.1.0+5.gabcdef0`. Tracked uncommitted changes
+add `.dirty` (or `+dirty` at the tag). Before the first release tag, the base
+version is followed by the commit hash. Untracked files do not mark a build dirty.
+See [versioning instructions](docs/installation.md#versioning) for tagging and
+source archive behavior.
+
 ## Tests
 
 Run the regression tests locally:

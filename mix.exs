@@ -1,10 +1,15 @@
+Code.require_file("build_support/version.exs", __DIR__)
+
 defmodule Geri.MixProject do
   use Mix.Project
+  @external_resource "build_support/version.exs"
 
   def project do
     [
       app: :geri,
-      version: "0.1.0",
+      version: Geri.BuildVersion.version(__DIR__, "0.1.0"),
+      # Git tags/commits can change without changing a source file's mtime.
+      aliases: ["compile.app": "compile.app --force"],
       elixir: "~> 1.20",
       start_permanent: Mix.env() == :prod,
       deps: deps(),

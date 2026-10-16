@@ -42,3 +42,6 @@ geri-*.tar
 # Bundled native dependency build output.
 /vendor/ex_ratatui/native/ex_ratatui/target/
 /vendor/ex_ratatui/priv/native/
+
+# Version stamp included only in generated source archives.
+/SOURCE_VERSION
