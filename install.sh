@@ -3,12 +3,15 @@ set -eu
 
 usage() {
   echo 'Usage: ./install.sh [--prefix DIR] [--release DIR]'
-  echo 'Defaults: --prefix /usr/local --release _build/prod/rel/geri'
+  echo 'Defaults: --prefix /usr/local; release: TUI build, otherwise headless build'
   echo 'Installs a previously built release; does not compile or fetch dependencies.'
 }
 SOURCE=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
 prefix=/usr/local
 release=$SOURCE/_build/prod/rel/geri
+if [ ! -x "$release/bin/geri" ] && [ -x "$SOURCE/_build/headless/prod/rel/geri/bin/geri" ]; then
+  release=$SOURCE/_build/headless/prod/rel/geri
+fi
 while [ "$#" -gt 0 ]; do
   case $1 in
     --prefix|--release)

@@ -74,8 +74,12 @@ Build as your normal user. For a personal installation without root, use
 
 `mix release` compiles the production application as needed. A separate
 `mix compile` or `mix escript.build` is not required to install this release.
-For development, `./geri.sh upload ...` continues to use
-`_build/prod/rel/geri`.
+For development, `./geri.sh upload ...` prefers `_build/prod/rel/geri` and
+falls back to `_build/headless/prod/rel/geri` when no executable TUI release
+is present. The installer uses the same preference unless `--release` is
+supplied. Installed launchers always use their adjacent release.
+A TUI build also supports `--no-tui`; you do not need both builds to run
+without the terminal UI.
 
 ## Headless install
 
@@ -89,7 +93,7 @@ and graceful signal cancellation. Requesting `--tui` returns an error.
 ```sh
 GERI_TUI=false MIX_ENV=prod mix deps.get
 GERI_TUI=false MIX_ENV=prod mix release --overwrite
-./install.sh --release _build/headless/prod/rel/geri
+./install.sh
 ```
 
 The same prefix and permissions choices apply: the command above installs
@@ -97,7 +101,9 @@ into `/usr/local`; add `--prefix "$HOME/.local"` for a personal installation.
 
 This release is built in `_build/headless/prod/rel/geri`, independently of
 the normal build. Keep `GERI_TUI=false` on all Mix commands for this variant.
-The installed release does not need that environment variable.
+The installed release does not need that environment variable. If a TUI
+release is also present, the installer prefers it; add
+`--release _build/headless/prod/rel/geri` to explicitly install headless instead.
 
 Run all regression tests for the headless build with:
 
@@ -126,7 +132,8 @@ For a personal installation (no root required):
 ./install.sh --prefix "$HOME/.local"
 ```
 
-For the headless release, supply its build directory explicitly:
+When only the headless release is built, the same commands select it
+automatically. To select it explicitly when both builds exist:
 
 ```sh
 ./install.sh --release _build/headless/prod/rel/geri

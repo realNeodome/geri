@@ -22,6 +22,8 @@ if [ -x "$DIR/bin/geri" ]; then
   release=$DIR/bin/geri
 elif [ -x "$DIR/_build/prod/rel/geri/bin/geri" ]; then
   release=$DIR/_build/prod/rel/geri/bin/geri
+elif [ -x "$DIR/_build/headless/prod/rel/geri/bin/geri" ]; then
+  release=$DIR/_build/headless/prod/rel/geri/bin/geri
 else
   echo "geri: release not found beside launcher; build and install the release first" >&2
   exit 1

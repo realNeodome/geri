@@ -121,8 +121,9 @@ Options precede filenames; `--` separates the two. These examples use TLS,
 the default yEnc encoding, and no TUI.
 
 Run the installed release with `geri upload ...`, or use `./geri.sh upload ...`
-from the source directory after building the release. For interactive
-progress and controls, replace `--no-tui` with `--tui` in a build with TUI
+from the source directory after building the release. The source launcher
+prefers the TUI build and falls back to the headless build if no executable
+TUI release is present. For interactive progress and controls, replace `--no-tui` with `--tui` in a build with TUI
 support. Run `geri --help` for all options.
 
 `--from` accepts a bare ASCII email address. Supply an optional display name
