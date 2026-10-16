@@ -200,6 +200,27 @@ defmodule Geri.RepairPoolTest do
     end)
   end
 
+  test "an idle repair worker crash becomes a verification failure without killing the checker", c do
+    with_checker(c, fn checker, server ->
+      server_pid = server.pid
+      check_missing(checker, hd(c.items))
+      assert_receive {:article, ^server_pid}, 2_000
+      send(server_pid, {:respond, "240 received\r\n"})
+      wait_until(fn -> not :sys.get_state(checker).repairing end)
+      [queue] = :sys.get_state(c.control).queues
+      wait_until(fn -> not :queue.is_empty(:sys.get_state(queue).consumers) end)
+      [{worker, _tag}] = :queue.to_list(:sys.get_state(queue).consumers)
+      Process.exit(worker, :kill)
+      wait_until(fn -> :sys.get_state(checker).repair_errors != [] end)
+      assert Process.alive?(checker)
+      assert Geri.Control.mode(c.control) == :running
+      assert {:error, {:verification_failed, summary,
+               [{:task_exited, :repair, {:worker, 1}, :killed}]}} = Geri.Checker.finish(checker)
+      assert summary.repaired == 1
+      assert :ok = Task.await(server, 2_000)
+    end)
+  end
+
   test "verification without missing articles never creates a repair pool", c do
     with_checker(
       c,

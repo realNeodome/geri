@@ -78,9 +78,9 @@ defmodule Geri do
         run_job(job, paths, connections, opts)
       after
         if signal_handler = Keyword.get(opts, :signal_handler), do: Geri.Signals.attach(signal_handler, nil)
-        Geri.JobState.abort(job)
-        GenServer.stop(job)
-        GenServer.stop(control)
+        cleanup(fn -> Geri.JobState.abort(job) end)
+        stop_process(job)
+        stop_process(control)
       end
     end
   end
@@ -107,7 +107,7 @@ defmodule Geri do
           end
         end
       after
-        GenServer.stop(queue)
+        stop_process(queue)
       end
     end
   end
@@ -188,24 +188,39 @@ defmodule Geri do
   end
 
   defp run_batch(queue, job, connections, opts, role, produce) do
-    producer = Task.async(fn -> finish_production(queue, produce.()) end)
+    # The supervisor owns task lifetimes; monitors report crashes to this owner
+    # without letting a task's exit signal kill it before cleanup and reporting.
+    {:ok, supervisor} = Task.Supervisor.start_link()
 
-    opts = if opts[:repair_notify], do: Keyword.put(opts, :repair_notify, producer.pid), else: opts
+    try do
+      producer = Task.Supervisor.async_nolink(supervisor, fn ->
+        finish_production(queue, produce.())
+      end)
 
-    workers =
-      for worker <- 1..connections do
-        Task.async(fn -> posting_worker(queue, job, worker, opts, role) end)
+      opts = if opts[:repair_notify], do: Keyword.put(opts, :repair_notify, producer.pid), else: opts
+
+      workers =
+        for worker <- 1..connections do
+          task = Task.Supervisor.async_nolink(supervisor, fn ->
+            posting_worker(queue, job, worker, opts, role)
+          end)
+          {task, {:worker, worker}}
+        end
+
+      if role == :posting do
+        Geri.Control.put_context(opts[:control], %{
+          producer: producer.pid,
+          workers: Enum.map(workers, fn {task, _actor} -> task.pid end)
+        })
       end
 
-    if role == :posting do
-      Geri.Control.put_context(opts[:control], %{
-        producer: producer.pid,
-        workers: Enum.map(workers, & &1.pid)
-      })
+      pending = Map.new([{producer, :producer} | workers], fn {task, actor} ->
+        {task.ref, {task, actor}}
+      end)
+      await_batch(pending, opts[:control], role, :ok)
+    after
+      cleanup(fn -> Supervisor.stop(supervisor, :normal, :infinity) end)
     end
-
-    pending = Map.new([producer | workers], &{&1.ref, &1})
-    await_batch(pending, opts[:control], role, :ok)
   end
 
   defp finish_production(queue, :ok), do: Geri.Queue.close(queue)
@@ -232,7 +247,12 @@ defmodule Geri do
         end
 
       {:DOWN, ref, :process, _pid, reason} when is_map_key(pending, ref) ->
-        exit({:upload_task_exited, reason})
+        {{_task, actor}, pending} = Map.pop!(pending, ref)
+
+        case result do
+          :ok -> stop_batch(pending, control, role, {:error, {:task_exited, role, actor, reason}})
+          _ -> await_batch(pending, control, role, result)
+        end
     end
   end
 
@@ -243,7 +263,7 @@ defmodule Geri do
 
   defp stop_batch(pending, control, :repair, {:error, :cancelled} = error) do
     # Wake a persistent repair producer waiting for its next batch or results.
-    Enum.each(pending, fn {_ref, task} -> send(task.pid, {:cancelled, control}) end)
+    Enum.each(pending, fn {_ref, {task, _actor}} -> send(task.pid, {:cancelled, control}) end)
     # User cancellation retains Control's grace period for active operations.
     await_batch(pending, control, :repair, error)
   end
@@ -254,7 +274,7 @@ defmodule Geri do
     # and replace the repair failure with a user-cancellation outcome.
     # Task shutdown waits for each worker's death; owned sockets/files close
     # and Control's process monitors remove their actor registrations.
-    Enum.each(pending, fn {_ref, task} -> Task.shutdown(task, :brutal_kill) end)
+    Enum.each(pending, fn {_ref, {task, _actor}} -> Task.shutdown(task, :brutal_kill) end)
     error
   end
 
@@ -380,7 +400,7 @@ defmodule Geri do
           {:error, reason}
       end
     after
-      Geri.Control.release(opts[:control])
+      cleanup(fn -> Geri.Control.release(opts[:control]) end)
     end
   end
 
@@ -895,7 +915,7 @@ defmodule Geri do
       try do
         run_batch(queue, job, connections, repair_opts, :repair, fn -> produce.(queue) end)
       after
-        GenServer.stop(queue)
+        stop_process(queue)
       end
     end
   end
@@ -1170,15 +1190,7 @@ defmodule Geri do
   defp finish_checker(nil), do: :ok
   defp finish_checker(checker), do: Geri.Checker.finish(checker)
 
-  defp stop_checker(nil), do: :ok
-
-  defp stop_checker(checker) do
-    if Process.alive?(checker) do
-      GenServer.stop(checker, :normal, :infinity)
-    else
-      :ok
-    end
-  end
+  defp stop_checker(checker), do: stop_process(checker)
 
   defp checker_options(opts) do
     repair_host = Keyword.get(opts, :repair_host) || Keyword.fetch!(opts, :check_host)
@@ -1261,8 +1273,22 @@ defmodule Geri do
     end
   end
 
-  defp stop_tui(nil), do: :ok
-  defp stop_tui(pid), do: GenServer.stop(pid, :normal, :infinity)
+  defp stop_tui(pid), do: stop_process(pid)
+
+  defp stop_process(nil), do: :ok
+  defp stop_process(pid), do: cleanup(fn -> GenServer.stop(pid, :normal, :infinity) end)
+
+  # Cleanup must not replace the operation's result or its original exception.
+  defp cleanup(action) do
+    try do
+      action.()
+    catch
+      :exit, {reason, _call} when reason in [:noproc, :normal, :shutdown] -> :ok
+      kind, reason ->
+        Logger.warning("cleanup failed: " <> Exception.format(kind, reason, __STACKTRACE__))
+        :ok
+    end
+  end
 
   defp redact_options(opts) do
     Enum.map(opts, fn
