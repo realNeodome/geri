@@ -241,10 +241,14 @@ changed articles receive new IDs and are posted. Changing a yEnc file's size
 or total part count can change every article's ID, requiring the whole file
 to be posted again. Articles from the earlier version remain on the server.
 
-If an NZB was requested, cancellation or failure preserves the unfinished
-NZB as `.part`. A restart creates a new NZB; it does not continue writing the
-old `.part` file. Choose a new `--nzb` filename if the previous NZB or its
+If an NZB was requested, cancellation or a posting failure preserves the
+unfinished NZB as `.part`. A restart creates a new NZB; it does not continue
+writing the old `.part` file. Choose a new `--nzb` filename if the previous NZB or its
 `.part` file still exists.
+
+When posting finishes, checking or repair failures still leave a complete NZB.
+If checking stops unexpectedly, posting continues and unchecked articles are
+reported as inconclusive. Geri returns a verification failure.
 
 NZB output requires a filesystem that supports hard links. Geri creates
 `.part` exclusively and publishes the completed NZB without replacing an

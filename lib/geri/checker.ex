@@ -32,6 +32,7 @@ defmodule Geri.Checker do
     if not is_integer(connections) or connections < 1 do
       {:stop, :invalid_check_connections}
     else
+      Process.flag(:trap_exit, true)
       parent = self()
 
       workers =
@@ -54,7 +55,8 @@ defmodule Geri.Checker do
         queue: :gb_trees.empty(),
         sequence: 0,
         timer: nil,
-        inflight: 0,
+        inflight: %{},
+        check_error: nil,
         accepting: true,
         finish_waiters: [],
         files: %{},
@@ -81,11 +83,13 @@ defmodule Geri.Checker do
 
     file = Map.get(state.files, item.file_number, %{total: item.part_total, terminal: MapSet.new(), missing: []})
 
+    state = put_in(state.files[item.file_number], file)
     state =
-      state
-      |> put_in([:files, item.file_number], file)
-      |> schedule(item, check_delay(0))
-      |> dispatch()
+      if state.check_error do
+        state |> stopped_check(item) |> maybe_start_repair()
+      else
+        state |> schedule(item, check_delay(0)) |> dispatch()
+      end
 
     {:reply, :ok, state}
   end
@@ -105,7 +109,7 @@ defmodule Geri.Checker do
     {:noreply, maybe_finish(state)}
   end
 
-  def handle_info({:checker_ready, pid, _id}, state) do
+  def handle_info({:checker_ready, pid, _id}, state) when is_map_key(state.workers, pid) do
     state =
       state
       |> Map.update!(:idle, &MapSet.put(&1, pid))
@@ -115,11 +119,11 @@ defmodule Geri.Checker do
     {:noreply, state}
   end
 
-  def handle_info({:checker_result, pid, id, item, result}, state) do
+  def handle_info({:checker_result, pid, id, item, result}, state) when is_map_key(state.inflight, pid) do
     state = %{
       state
       | idle: MapSet.put(state.idle, pid),
-        inflight: max(state.inflight - 1, 0)
+        inflight: Map.delete(state.inflight, pid)
     }
 
     state =
@@ -151,6 +155,24 @@ defmodule Geri.Checker do
 
     {:noreply, state}
   end
+
+  # Results already in the mailbox must not undo a stopped check's outcome.
+  def handle_info({:checker_ready, _pid, _id}, state), do: {:noreply, state}
+  def handle_info({:checker_result, _pid, _id, _item, _result}, state), do: {:noreply, state}
+
+  def handle_info({:EXIT, pid, reason}, state) when is_map_key(state.workers, pid) do
+    error = {:task_exited, :checking, {:worker, Map.fetch!(state.workers, pid)}, reason}
+    Logger.error("checking stopped: #{inspect(error)}")
+    state = state |> stop_checking(error) |> maybe_start_repair() |> maybe_finish()
+    {:noreply, state}
+  end
+
+  def handle_info({:EXIT, pid, reason}, %{repair_pid: pid} = state) do
+    # Trapping worker exits also exposes an unexpected exit of the repair owner.
+    handle_info({:repair_pool_finished, pid, {:error, {:task_exited, :repair, :coordinator, reason}}}, state)
+  end
+
+  def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
 
   def handle_info({:repair_finished, pid, file_number, producer}, %{repair_pid: pid} = state) do
     Logger.info("repair pass completed")
@@ -194,12 +216,32 @@ defmodule Geri.Checker do
       Process.exit(state.repair_pid, :shutdown)
     end
 
+    stop_workers(state)
+
+    :ok
+  end
+
+  defp stop_workers(state) do
     Enum.each(state.workers, fn {pid, _id} ->
       Process.unlink(pid)
       Process.exit(pid, :shutdown)
     end)
+  end
 
-    :ok
+  defp stop_checking(state, error) do
+    stop_workers(state)
+    state = cancel_timer(state)
+    pending = Map.values(state.inflight) ++ Enum.map(:gb_trees.to_list(state.queue), &elem(&1, 1))
+    state = %{state | workers: %{}, idle: MapSet.new(), inflight: %{}, queue: :gb_trees.empty(), check_error: error}
+    Enum.reduce(pending, state, fn item, acc -> stopped_check(acc, item) end)
+  end
+
+  defp stopped_check(state, item) do
+    {:task_exited, :checking, {:worker, id}, _reason} = state.check_error
+    # Keep the full crash once in the final error list, rather than copying its
+    # stack trace into every article that could not be checked.
+    Geri.JobState.check_inconclusive(state.job, item, id, :checker_stopped)
+    complete_check(state, item, :inconclusive)
   end
 
   defp handle_missing(state, item, checker_id) do
@@ -292,7 +334,7 @@ defmodule Geri.Checker do
             state
             | idle: MapSet.delete(state.idle, worker),
               queue: :gb_trees.delete(key, state.queue),
-              inflight: state.inflight + 1
+              inflight: Map.put(state.inflight, worker, item)
           }
 
           dispatch_ready(state)
@@ -375,7 +417,7 @@ defmodule Geri.Checker do
         Enum.each(state.finish_waiters, &GenServer.reply(&1, {:error, :cancelled}))
         %{state | finish_waiters: []}
 
-      not state.accepting and state.inflight == 0 and
+      not state.accepting and map_size(state.inflight) == 0 and
          :gb_trees.is_empty(state.queue) and not state.repairing and
          state.repairs == [] and map_size(state.files) == 0 ->
         if state.repair_pid do
@@ -384,7 +426,8 @@ defmodule Geri.Checker do
           send(state.repair_producer, :finish)
           %{state | repairing: true}
         else
-          result = Geri.JobState.result(state.job, Enum.reverse(state.repair_errors))
+          errors = List.wrap(state.check_error) ++ Enum.reverse(state.repair_errors)
+          result = Geri.JobState.result(state.job, errors)
           Enum.each(state.finish_waiters, &GenServer.reply(&1, result))
           %{state | finish_waiters: []}
         end

@@ -222,7 +222,7 @@ defmodule Geri.CLI do
       {:error, {:verification_inconclusive, summary}} ->
         {:error, {:verification_inconclusive, summary}}
       {:error, {:verification_failed, summary, reasons}} ->
-        {:error, "verification or repair failed: #{verification_message(summary)}; repair errors: #{inspect(reasons)}"}
+        {:error, "verification or repair failed: #{verification_message(summary)}; checking or repair errors: #{inspect(reasons)}"}
       {:error, {kind, reason, details}} when kind in [:upload_failed, :finalization_failed] ->
         {:error, "#{kind}: #{inspect(reason)}; upload key: #{details.upload_key}"}
       {:error, {:invalid_option, key, reason}} ->

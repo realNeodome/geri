@@ -221,13 +221,70 @@ defmodule Geri.RepairPoolTest do
     end)
   end
 
+  test "a checker crash lets an active repair finish while marking queued checks inconclusive", c do
+    with_checker(c, fn checker, server ->
+      server_pid = server.pid
+      [first, second] = c.items
+      check_missing(checker, first)
+      assert_receive {:article, ^server_pid}, 2_000
+      :ok = Geri.Checker.enqueue(checker, second)
+      [worker] = Map.keys(:sys.get_state(checker).workers)
+      Process.exit(worker, :kill)
+      wait_until(fn -> :sys.get_state(checker).check_error != nil end)
+      finish = Task.async(fn -> Geri.Checker.finish(checker) end)
+      assert Task.yield(finish, 20) == nil
+      assert Geri.Control.mode(c.control) == :running
+      send(server_pid, {:respond, "240 received\r\n"})
+      assert {:error, {:verification_failed, summary,
+               [{:task_exited, :checking, {:worker, 1}, :killed}]}} = Task.await(finish, 2_000)
+      assert summary.repaired == 1
+      assert summary.inconclusive == 1
+      assert summary.missing == 0
+      assert :ok = Task.await(server, 2_000)
+    end)
+  end
+
+  test "a partly checked file repairs only articles already confirmed missing before a crash", c do
+    with_checker(c, fn checker, server ->
+      server_pid = server.pid
+      [missing, unknown] = split_first_file(c, 2)
+      check_missing(checker, missing)
+      :ok = Geri.Checker.enqueue(checker, unknown)
+      [worker] = Map.keys(:sys.get_state(checker).workers)
+      Process.exit(worker, :kill)
+      assert_receive {:article, ^server_pid}, 2_000
+      send(server_pid, {:respond, "240 received\r\n"})
+      assert {:error, {:verification_failed, summary,
+               [{:task_exited, :checking, {:worker, 1}, :killed}]}} = Geri.Checker.finish(checker)
+      assert summary.repaired == 1
+      assert summary.inconclusive == 1
+      assert summary.missing == 0
+      assert :ok = Task.await(server, 2_000)
+    end)
+  end
+
+  test "an unexpected repair coordinator exit is still reported when worker exits are trapped", c do
+    with_checker(c, fn checker, server ->
+      server_pid = server.pid
+      check_missing(checker, hd(c.items))
+      assert_receive {:article, ^server_pid}, 2_000
+      Process.exit(:sys.get_state(checker).repair_pid, :kill)
+      wait_until(fn -> :sys.get_state(checker).repair_errors != [] end)
+      send(server_pid, {:respond, "240 received\r\n"})
+      assert {:error, {:verification_failed, _summary,
+               [{:task_exited, :repair, :coordinator, :killed}]}} = Geri.Checker.finish(checker)
+      assert Geri.Control.mode(c.control) == :running
+      assert :ok = Task.await(server, 2_000)
+    end)
+  end
+
   test "verification without missing articles never creates a repair pool", c do
     with_checker(
       c,
       fn checker, _server ->
         for item <- c.items, do: Geri.Checker.enqueue(checker, item)
         advance_checks(checker)
-        wait_until(fn -> :sys.get_state(checker).inflight == 0 end)
+        wait_until(fn -> map_size(:sys.get_state(checker).inflight) == 0 end)
         assert :ok = Geri.Checker.finish(checker)
         assert :sys.get_state(checker).repair_pid == nil
         assert :sys.get_state(c.control).queues == []
@@ -360,7 +417,7 @@ defmodule Geri.RepairPoolTest do
 
     for _ <- 1..3 do
       advance_checks(checker)
-      wait_until(fn -> :sys.get_state(checker).inflight == 0 end)
+      wait_until(fn -> map_size(:sys.get_state(checker).inflight) == 0 end)
     end
   end
 

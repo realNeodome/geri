@@ -298,7 +298,8 @@ if checker do
   %{
     accepting: cstate.accepting,
     pending: :gb_trees.size(cstate.queue),
-    inflight: cstate.inflight,
+    inflight: map_size(cstate.inflight),
+    check_error: cstate.check_error,
     idle_workers: MapSet.size(cstate.idle),
     repairing: cstate.repairing,
     queued_repair_batches: length(cstate.repairs),
@@ -333,6 +334,9 @@ end
 A timer can become due while paused, but network work still waits at the
 pause gate. `inflight` includes assigned work whose worker may be waiting
 at that gate; it is not a count of currently open network operations.
+The raw `cstate.inflight` map associates worker PIDs with their assigned articles.
+`check_error` is nil normally and retains the original cause if checking stops
+after a worker crash.
 
 Checker workers are available in the raw worker map:
 

@@ -66,7 +66,7 @@ defmodule Geri.JobState do
   end
 
   def verification(job), do: GenServer.call(job, :verification, :infinity)
-  def result(job, repair_errors \\ []), do: GenServer.call(job, {:result, repair_errors}, :infinity)
+  def result(job, verification_errors \\ []), do: GenServer.call(job, {:result, verification_errors}, :infinity)
   def failure_info(job), do: GenServer.call(job, :failure_info, :infinity)
   def snapshot(job), do: GenServer.call(job, :snapshot, :infinity)
   def finalize(job), do: GenServer.call(job, :finalize, :infinity)
@@ -168,12 +168,12 @@ defmodule Geri.JobState do
     {:reply, failure_details(state), state}
   end
 
-  def handle_call({:result, repair_errors}, _from, state) do
+  def handle_call({:result, verification_errors}, _from, state) do
     summary = verification_summary(state)
 
     result = cond do
-      repair_errors != [] or summary.missing > 0 or summary.repair_failed > 0 ->
-        {:error, {:verification_failed, failure_details(state), repair_errors}}
+      verification_errors != [] or summary.missing > 0 or summary.repair_failed > 0 ->
+        {:error, {:verification_failed, failure_details(state), verification_errors}}
       summary.inconclusive > 0 ->
         {:error, {:verification_inconclusive, failure_details(state)}}
       true -> :ok
