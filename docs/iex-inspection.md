@@ -18,6 +18,20 @@ input device at EOF, causing later IEx sessions to close immediately.
 Console logging stays suspended during inspection; upload messages continue
 to be written to `log/geri.log` relative to the upload's working directory.
 
+**Keep the working directory unchanged while an upload is running.** IEx
+`cd/1` and `File.cd/1` change the directory for the entire VM, including upload
+processes. Relative input paths can then fail to open, or name a different file,
+when a later file or repair is read. Relative output paths can also be affected.
+Pausing does not make a directory change safe. Use `pwd()` to inspect the current
+directory and absolute paths when saving diagnostics.
+
+Example outputs below use invented values. `...` marks omitted fields or data;
+those abbreviated outputs are for reading, not expressions to paste into IEx.
+They show the shape of each structure, not one consistent snapshot of an upload.
+Maps use `%{}`, structs such as `%Geri.Article{}` are named maps, lists use `[]`,
+and tuples use `{}`. `#PID<...>` identifies a process; `MapSet.new([...])` denotes
+a set. Encoded bodies and hashes are shortened to keep the examples readable.
+
 ## Contents
 
 - [Available bindings](#available-bindings)
@@ -104,6 +118,27 @@ if s.progress.total_bytes > 0 do
 end
 ```
 
+An abbreviated snapshot looks like this:
+
+```text
+%{
+  key: "example-upload-key",
+  posting: %{host: "news-a.example.com", port: 563, tls: :implicit,
+             newsgroups: ["alt.binaries.test"]},
+  progress: %{active_file: 3, posted_bytes: 1433600, total_bytes: 10485760,
+              checked_bytes: 716800, ...},
+  files: [%{number: 3, filename: "sample.bin", total_parts: 15,
+            posted_parts: 2, checked_parts: 1, ...}, ...],
+  activity: [%{kind: :posted, filename: "sample.bin", part: 2, ...}, ...],
+  ...
+}
+```
+
+Byte counters describe source bytes, not the larger encoded articles sent over
+the network. `checked_bytes` is `nil` when checking is disabled. File numbers
+and part numbers start at 1. `files` is a list here; the raw `j.ui.files` field
+is a map keyed by file number.
+
 `s.files` represents the current UI window and need not contain every file.
 `s` does not update automatically. Request a fresh snapshot when needed:
 
@@ -126,6 +161,16 @@ Geri.JobState.verification(job)
 | `repaired` | Articles successfully repaired |
 | `repair_failed` | Articles whose repair failed |
 | `inconclusive` | Articles whose presence could not be established |
+
+For example, the verification result is a map of counts:
+
+```elixir
+%{confirmed: 12, missing: 1, repaired: 2, repair_failed: 0, inconclusive: 0}
+```
+
+Pending checks are not included in these five outcome counters. A successful
+repair increments `repaired` and removes that part from `missing`; it does not
+increment `confirmed`.
 
 For more detail:
 
@@ -151,6 +196,17 @@ details.unresolved
   ])
 end)
 ```
+
+One selected unresolved entry might look like:
+
+```text
+%{filename: "sample.bin", file_number: 3, part: 2,
+  message_id: "<example-id@1234abcd.geri>", outcome: :pending}
+```
+
+`reason` is present only when that entry has a recorded reason; `Map.take/2`
+does not create absent keys. Part identity is the pair `{file_number, part}`,
+so part 2 of two different files represents two different articles.
 
 Count unresolved articles by outcome:
 
@@ -190,6 +246,26 @@ j.recovery
 the job, queue, checker and control coordinator. Ordinary worker tasks do
 not implement this GenServer inspection interface.
 
+The job state groups related data under these keys:
+
+```text
+%{
+  job: %{key: "example-upload-key", paths: ["sample.bin", ...], ...},
+  posting: %{host: "news-a.example.com", ...},
+  checker: #PID<0.210.0>, control: #PID<0.205.0>,
+  ui: %{active_file: 3, files: %{3 => %{filename: "sample.bin", ...}}, ...},
+  verification: %{totals: %{confirmed: 12, ...}, files: %{...},
+                  unresolved: %{{3, 2} => %{outcome: :pending, ...}}, ...},
+  recovery: %{completed_files: 2, files: %{...}},
+  nzb: %{next_file: 3, pending_files: %{...}, writer: %Geri.NZB{...}, ...}
+}
+```
+
+`job` contains upload configuration, `ui` feeds the display, and `verification`
+tracks propagation outcomes. `recovery` tracks posting work; `nzb` tracks output
+segments. `nzb` and `checker` can be `nil` when their features are disabled.
+These are ordinary nested maps, not one struct with methods.
+
 Raw state can contain credentials, especially posting and checker options.
 The provided `opts` binding is redacted; raw state is not. Select relevant
 fields before sharing diagnostic output.
@@ -222,6 +298,21 @@ details.recovery.files
   }
 end)
 ```
+
+For example, an unfinished recovery file can contain:
+
+```text
+%{
+  file_number: 3, path: "sample.bin", total_parts: 15, next_part: 4,
+  unresolved: %{2 => %{message_id: "<example-id@1234abcd.geri>",
+                       source_hash: <<...>>}}
+}
+```
+
+Here parts 1 through 3 have been prepared, part 2 still needs posting, and
+parts 1 and 3 have completed posting. The hash records the source bytes used
+for that part. `unresolved` is keyed by part number within this file; it is
+separate from the upload-wide verification map keyed by `{file_number, part}`.
 
 `next_part` is the producer frontier. It does not mean that all preceding
 parts have been posted successfully. Unresolved parts can remain below it.
@@ -278,6 +369,26 @@ q.ready
 end)
 ```
 
+Before projection, a ready posting item has this shape:
+
+```text
+{
+  %{filename: "sample.bin", file_number: 3, part: 2, total: 15,
+    encoding: :yenc, offset: 716800, source_size: 716800,
+    source_hash: <<...>>, body: "=ybegin ...", ...},
+  %Geri.Article{message_id: "<example-id@1234abcd.geri>",
+                from: "uploader@example.com", subject: "...",
+                data: "From: ...\r\n..."}
+}
+```
+
+`part.body` is the encoded body; `article.data` includes headers and that body.
+Both can be large. `offset` is a zero-based source-file byte position, while
+`part` is a one-based part number. `source_size` counts source bytes;
+`byte_size(article.data)` counts encoded article bytes including headers.
+The queue itself does not prescribe an item type: the repair queue uses
+`{item, part, article}`, adding the check/repair metadata described below.
+
 Workers may already hold articles while waiting at the pause gate. Those
 articles do not appear in `q.ready`. A closed queue can still contain ready
 items: closing means no more items will be accepted, not that all items
@@ -330,6 +441,35 @@ if checker do
   end)
 end
 ```
+
+A scheduled or inflight check carries metadata, not the encoded body:
+
+```text
+%{file_number: 3, filename: "sample.bin", path: "sample.bin",
+  part: 2, part_total: 15, encoding: :yenc,
+  offset: 716800, source_size: 716800, source_hash: <<...>>,
+  message_id: "<example-id@1234abcd.geri>", attempt: 0, errors: 0, ...}
+```
+
+`attempt` and `errors` are retry bookkeeping. This map uses `part_total` where
+the encoder's part map uses `total`. Its path, offset, source hash and encoding
+metadata let repair reread and verify the original bytes, then rebuild the
+article. Repairs do not keep another encoded body in this metadata.
+
+The coordinator's collections have different keys:
+
+| Field | Structure and contents |
+| --- | --- |
+| `workers` | Map from worker PID to numeric worker ID |
+| `idle` | Set of worker PIDs available for assignment |
+| `queue` | Balanced tree from `{due_time, sequence}` to check item |
+| `inflight` | Map from worker PID to assigned check item |
+| `files` | Map from file number to total parts, terminal-part set and missing-item list |
+| `repairs` | List of item lists, one batch per file awaiting repair |
+
+`repair_pid` identifies the persistent repair coordinator; it can remain alive
+between batches even when `repairing` is false. Its worker PIDs are not the
+posting `workers` binding.
 
 A timer can become due while paused, but network work still waits at the
 pause gate. `inflight` includes assigned work whose worker may be waiting
@@ -417,6 +557,19 @@ ctl = :sys.get_state(control)
 }
 ```
 
+A coordinator can look like this during inspection:
+
+```text
+%{mode: :paused, actors: %{#PID<0.220.0> => %{busy: false, conn: nil}},
+  queues: [#PID<0.206.0>], waiters: [...], idle_waiters: [],
+  context: %{job: #PID<0.204.0>, queue: #PID<0.206.0>, ...}, timer: nil}
+```
+
+`waiters` holds blocked calls waiting for permission to continue, not articles.
+`actors` describes registered network workers; `queues` contains queue PIDs.
+These fields therefore need not have the same counts as posting or checking
+connections.
+
 Examine registered network actors:
 
 ```elixir
@@ -458,6 +611,26 @@ if j.nzb do
   Map.drop(j.nzb, [:writer])
 end
 ```
+
+An abbreviated `details.nzb` value:
+
+```text
+%{path: "upload.nzb", file_total: 10, next_file: 3,
+  pending_files: %{
+    3 => %{filename: "sample.bin", total_parts: 15,
+           groups_used: MapSet.new(["alt.binaries.test"]),
+           segments: %{1 => %{bytes: 728400,
+                             message_id: "example-id@1234abcd.geri"}}, ...}
+  }}
+```
+
+`pending_files` is keyed by file number and each `segments` map by part number.
+Segments are recorded after successful posting, so gaps can exist while workers
+finish out of order. Segment `bytes` counts the encoded article, not source
+bytes; the stored NZB Message-ID omits the surrounding angle brackets.
+`next_file` is the next file block to flush, not the next file to check.
+The public diagnostic view omits `writer`; the raw state includes a
+`%Geri.NZB{io: ..., path: ..., temp_path: ...}` writer while it is open.
 
 Completed file blocks are flushed incrementally, so their per-segment data
 need not remain in memory. Do not call `finalize(job)` or `abort(job)` merely
@@ -530,9 +703,9 @@ File.write!(
 )
 ```
 
-Check the working directory with `pwd()`. `File.write!/2` overwrites an
-existing file with that name. Avoid changing the working directory during
-an upload, since other operations may use relative paths.
+Check the working directory with `pwd()` without changing it. `File.write!/2`
+overwrites an existing file with that name. For another output directory,
+supply an absolute filename rather than using `cd/1`.
 
 ## Operations that change the upload
 

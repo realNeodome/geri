@@ -225,9 +225,27 @@ Ctrl-D can leave the terminal input device at EOF and prevent later IEx
 sessions from accepting input. Avoid `System.halt/0`
 or terminating the IEx evaluator, since this is the upload's VM.
 
-See the [IEx inspection guide](docs/iex-inspection.md) for examples of
-examining progress, verification, queues, worker processes, recovery state
-and NZB bookkeeping.
+**Keep the working directory unchanged during an upload.** IEx `cd/1` and
+`File.cd/1` change it for the entire VM, not just the prompt. Relative input
+paths can then point elsewhere when later files or repairs are opened; relative
+output paths can also be affected. Use absolute paths when saving diagnostics.
+
+For a compact view of the data behind the TUI:
+
+```elixir
+s = Geri.JobState.snapshot(job)
+Map.take(s.progress, [:active_file, :posted_bytes, :total_bytes])
+# Example: %{active_file: 3, posted_bytes: 1433600, total_bytes: 10485760}
+```
+
+The snapshot is a map; `s.files` is a list of file-progress maps. Posting queue
+entries are `{part, article}` tuples: `part` holds encoding metadata and the
+encoded body, while `%Geri.Article{}` holds the Message-ID and complete article.
+These are snapshots of live state, not editable handles to the running upload.
+
+See the [IEx inspection guide](docs/iex-inspection.md) for short example
+structures and commands for examining progress, verification, queues, worker
+processes, recovery state and NZB bookkeeping.
 
 ## Retrying an interrupted upload
 
