@@ -5,6 +5,7 @@ defmodule Geri.NNTP do
 
   @connect_timeout 15_000
   @recv_timeout 30_000
+  @max_response_length 512
 
   def connect(opts) do
     host = Keyword.fetch!(opts, :host)
@@ -276,7 +277,8 @@ defmodule Geri.NNTP do
     options = [
       :binary,
       active: false,
-      packet: :line
+      packet: :line,
+      packet_size: @max_response_length
     ]
 
     case :gen_tcp.connect(
@@ -408,6 +410,7 @@ defmodule Geri.NNTP do
       :binary,
       active: false,
       packet: :line,
+      packet_size: @max_response_length,
       server_name_indication: hostname
     ]
 
@@ -441,12 +444,20 @@ defmodule Geri.NNTP do
   end
 
   defp recv_response(conn) do
-    case recv_line(conn) do
-      {:ok, line} ->
-        parse_response(line)
+    response =
+      case recv_line(conn) do
+        {:ok, line} -> parse_response(line)
+        {:error, reason} -> {:error, {:recv_failed, reason}}
+      end
 
-      {:error, reason} ->
-        {:error, {:recv_failed, reason}}
+    case response do
+      {:error, _reason} = error ->
+        # Never reuse an incomplete or malformed response stream.
+        close(conn)
+        error
+
+      reply ->
+        reply
     end
   end
 
@@ -550,6 +561,9 @@ defmodule Geri.NNTP do
     end
   end
 
+  defp parse_response(line) when byte_size(line) > @max_response_length,
+    do: {:error, :response_too_long}
+
   defp parse_response(line) do
     size = byte_size(line)
 
@@ -581,10 +595,11 @@ defmodule Geri.NNTP do
             (b - ?0) * 10 +
             (c - ?0)
 
-        message =
-          String.trim_leading(rest)
-
-        {:ok, code, message}
+        case rest do
+          "" -> {:ok, code, ""}
+          <<" ", message::binary>> -> {:ok, code, String.trim_leading(message, " ")}
+          _ -> {:error, {:invalid_response, line}}
+        end
 
       _ ->
         {:error, {:invalid_response, line}}

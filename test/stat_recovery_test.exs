@@ -90,6 +90,8 @@ defmodule Geri.StatRecoveryTest do
 
   for {label, reply} <- [
         {"malformed response", "not an NNTP reply\r\n"},
+        {"missing separator", "223garbage\r\n"},
+        {"oversized response", "223 " <> String.duplicate("a", 507) <> "\r\n"},
         {"invalid line ending", "223 present\n"}
       ] do
     test "preliminary STAT #{label} discards queued replies before reconnecting", c do
@@ -108,6 +110,31 @@ defmodule Geri.StatRecoveryTest do
         end)
 
       assert {:ok, "fixed-key"} = result
+    end
+  end
+
+  for {label, reply} <- [
+        {"missing separator", "240garbage\r\n"},
+        {"tab separator", "240\taccepted\r\n"},
+        {"oversized response", "240 " <> String.duplicate("a", 507) <> "\r\n"}
+      ] do
+    test "final POST #{label} verifies on a fresh socket without reposting", c do
+      {result, :verified} =
+        upload(c, fn listener ->
+          first = accept(listener)
+          id = receive_unacknowledged_post(first)
+          :ok = :gen_tcp.send(first, unquote(reply) <> "240 accepted\r\n")
+          expect_closed(first)
+
+          second = accept(listener)
+          assert expect_stat(second) == id
+          :ok = :gen_tcp.send(second, "223 0 #{id}\r\n")
+          expect_quit(second)
+          :verified
+        end, false)
+
+      assert {:ok, _key} = result
+      assert File.read!(c.nzb) =~ "</nzb>"
     end
   end
 
