@@ -193,6 +193,22 @@ unrelated command or an unrecognized installation directory.
 User credentials, source files, NZBs, and redirected logs are outside
 the installed release and are not touched.
 
+Only one installer can modify a prefix at a time. Its private staging directory,
+`PREFIX/lib/.geri-install.lock`, also acts as the installation lock. A competing
+installer exits with an error instead of waiting or changing the installation.
+An existing correct command symlink is reused.
+
+If installation fails before the command link is ready, the installer restores
+the previous release, or removes the new release on a first installation.
+If rollback fails, it retains the lock and recovery files and prints their
+location. The previous release, when present, is in `.geri-install.lock/previous`.
+
+A forcibly terminated installer can also leave this directory behind. Before
+removing it, confirm that no installer is running and inspect its contents.
+If `previous` contains the old release, preserve it and restore it to `lib/geri`
+after moving any failed replacement aside. Remove the lock directory only after
+the installed release and any needed backup have been recovered.
+
 To remove the system installation, after stopping jobs:
 
 ```sh
