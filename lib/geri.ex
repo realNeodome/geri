@@ -580,7 +580,7 @@ defmodule Geri do
 
   defp network_step(conn, opts, operation) do
     control = opts[:control]
-    case Geri.Control.checkout(control, conn) do
+    case Geri.Control.checkout(control, conn, opts[:worker]) do
       {:error, reason} -> {:error, reason, nil}
       {:ok, conn} ->
         result = with {:ok, conn} <- ensure_post_connection(conn, opts),
@@ -713,7 +713,7 @@ defmodule Geri do
         5_000
       )
 
-    with {:ok, _} <- Geri.Control.checkout(opts[:control], nil) do
+    with {:ok, _} <- Geri.Control.checkout(opts[:control], nil, opts[:worker]) do
       Logger.warning("worker #{worker} reconnecting")
       case connect(opts) do
         {:ok, conn} ->

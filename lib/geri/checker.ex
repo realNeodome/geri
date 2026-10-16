@@ -439,7 +439,7 @@ defmodule Geri.Checker do
   defp worker_loop(parent, id, opts, conn) do
     receive do
       {:check, item} ->
-        {result, conn} = controlled_check(conn, item, opts)
+        {result, conn} = controlled_check(conn, item, opts, id)
         send(parent, {:checker_result, self(), id, item, result})
         worker_loop(parent, id, opts, conn)
 
@@ -450,9 +450,9 @@ defmodule Geri.Checker do
     end
   end
 
-  defp controlled_check(conn, item, opts) do
+  defp controlled_check(conn, item, opts, id) do
     control = opts[:control]
-    case Geri.Control.checkout(control, conn) do
+    case Geri.Control.checkout(control, conn, "C#{id}") do
       {:error, :cancelled} -> {:cancelled, nil}
       {:ok, conn} ->
         {result, conn} = check_item(conn, item, opts)

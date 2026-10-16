@@ -20,8 +20,9 @@ defmodule Geri.Control do
     end
   end
   def await_idle(control), do: GenServer.call(control, :await_idle, :infinity)
-  def checkout(nil, conn), do: {:ok, conn}
-  def checkout(control, conn), do: GenServer.call(control, {:checkout, conn}, :infinity)
+  def checkout(control, conn, worker \\ nil)
+  def checkout(nil, conn, _worker), do: {:ok, conn}
+  def checkout(control, conn, worker), do: GenServer.call(control, {:checkout, conn, worker}, :infinity)
   def connected(nil, _conn), do: :ok
   def connected(control, conn), do: GenServer.call(control, {:connected, conn}, :infinity)
   def checkin(nil, conn), do: conn
@@ -49,12 +50,17 @@ defmodule Geri.Control do
   end
 
   def handle_call(:pause, _from, %{mode: :cancelled} = state), do: {:reply, {:error, :cancelled}, state}
+  def handle_call(:pause, _from, %{mode: mode} = state) when mode in [:pausing, :paused],
+    do: {:reply, :ok, state}
   def handle_call(:pause, _from, state) do
-    {:reply, :ok, close_idle(%{state | mode: :paused})}
+    activity(state, "preparing to pause Geri")
+    {:reply, :ok, state |> Map.put(:mode, :pausing) |> close_idle() |> notify_idle()}
   end
 
   def handle_call(:resume, _from, %{mode: :cancelled} = state), do: {:reply, {:error, :cancelled}, state}
+  def handle_call(:resume, _from, %{mode: :running} = state), do: {:reply, :ok, state}
   def handle_call(:resume, _from, state) do
+    activity(state, "Geri resumed")
     state = %{state | mode: :running}
     state = Enum.reduce(Enum.reverse(state.waiters), state, fn {from, operation}, acc ->
       {reply, acc} = enter(acc, from, operation)
@@ -86,7 +92,7 @@ defmodule Geri.Control do
   def handle_call(operation, from, state) when operation == :await or elem(operation, 0) == :checkout do
     case state.mode do
       :cancelled -> {:reply, {:error, :cancelled}, state}
-      :paused -> {:noreply, %{state | waiters: [{from, operation} | state.waiters]}}
+      mode when mode in [:pausing, :paused] -> {:noreply, %{state | waiters: [{from, operation} | state.waiters]}}
       :running ->
         {reply, state} = enter(state, from, operation)
         {:reply, reply, state}
@@ -107,7 +113,7 @@ defmodule Geri.Control do
 
   def handle_call({:checkin, conn}, {pid, _}, state) do
     actor = Map.fetch!(state.actors, pid)
-    conn = if state.mode == :running, do: conn, else: close(conn)
+    conn = if state.mode == :running, do: conn, else: close_actor(state, %{actor | conn: conn || actor.conn})
     state = put_in(state.actors[pid], %{actor | conn: conn, busy: false})
     {:reply, conn, notify_idle(state)}
   end
@@ -137,11 +143,11 @@ defmodule Geri.Control do
   end
 
   defp enter(state, _from, :await), do: {:ok, state}
-  defp enter(state, {pid, _}, {:checkout, supplied_conn}) do
+  defp enter(state, {pid, _}, {:checkout, supplied_conn, worker}) do
     actor = Map.get_lazy(state.actors, pid, fn ->
-      %{conn: supplied_conn, busy: false, monitor: Process.monitor(pid)}
+      %{conn: supplied_conn, busy: false, monitor: Process.monitor(pid), worker: worker}
     end)
-    state = put_in(state.actors[pid], %{actor | busy: true})
+    state = put_in(state.actors[pid], %{actor | busy: true, worker: worker || actor.worker})
     {{:ok, actor.conn}, state}
   end
 
@@ -159,9 +165,21 @@ defmodule Geri.Control do
     nil
   end
 
+  defp activity(state, message, worker \\ nil) do
+    if job = state.context[:job], do: Geri.JobState.activity(job, message, worker)
+    :ok
+  end
+
+  defp close_actor(_state, %{conn: nil}), do: nil
+  defp close_actor(state, actor) do
+    close(actor.conn)
+    if state.mode in [:pausing, :paused], do: activity(state, "connection closed", actor.worker)
+    nil
+  end
+
   defp close_idle(state) do
     actors = Map.new(state.actors, fn {pid, actor} ->
-      {pid, if(actor.busy, do: actor, else: %{actor | conn: close(actor.conn)})}
+      {pid, if(actor.busy, do: actor, else: %{actor | conn: close_actor(state, actor)})}
     end)
     %{state | actors: actors}
   end
@@ -169,6 +187,13 @@ defmodule Geri.Control do
   defp idle?(state), do: Enum.all?(state.actors, fn {_pid, actor} -> not actor.busy end)
   defp notify_idle(state) do
     if idle?(state) do
+      state =
+        if state.mode == :pausing do
+          activity(state, "Geri paused")
+          %{state | mode: :paused}
+        else
+          state
+        end
       Enum.each(state.idle_waiters, &GenServer.reply(&1, :ok))
       %{state | idle_waiters: []}
     else
@@ -181,7 +206,7 @@ defmodule Geri.Control do
       {nil, _} -> state
       {actor, actors} ->
         Process.demonitor(actor.monitor, [:flush])
-        close(actor.conn)
+        close_actor(state, actor)
         notify_idle(%{state | actors: actors})
     end
   end

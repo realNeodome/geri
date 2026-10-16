@@ -76,7 +76,7 @@ defmodule Geri.CLI do
 
   Options must precede filenames. The -- separator is optional.
 
-  TUI keys: p pause/resume; ` pause and inspect in IEx; q/Esc hide the TUI.
+  TUI keys: p pause/resume; ` pause and inspect in IEx; q/Esc resume and hide the TUI.
   In IEx: resume.() returns to the TUI and resumes the upload.
   Ctrl-C cancels gracefully; a second Ctrl-C forces exit (geri.sh or TUI).
 

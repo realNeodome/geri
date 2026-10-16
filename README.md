@@ -199,7 +199,12 @@ can take its configured connection timeout to return.
 With `--tui`, press `p` to pause or resume. New posting, checking, and repair
 operations wait while paused; active operations finish and idle connections
 close. Queues, recovery information, and the NZB writer stay in memory.
-Press `q` or Escape to hide the TUI; this does not cancel the upload.
+The header shows **PAUSING** while active network operations finish, then
+**PAUSED** when network workers are idle and their connections have closed.
+Activity records the pause request, connection closures and completed pause;
+resuming adds “Geri resumed”. Workers without a connection have no closure entry.
+Press `q` or Escape to resume a paused upload and hide the TUI; this does not
+cancel the upload.
 Pause does not persist state across process exits.
 
 ### IEx inspection

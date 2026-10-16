@@ -542,7 +542,32 @@ Process.info(producer, :current_stacktrace)
 Geri.Control.mode(control)
 ```
 
-Normally the inspection prompt opens with mode `:paused`.
+The coordinator reports `:pausing` while active network operations finish and
+`:paused` once all network actors are idle. Both states block new network work.
+Normally the inspection prompt opens with mode `:paused`, because it waits for
+active operations to settle. The TUI header displays these as **PAUSING** and
+**PAUSED**; other header text keeps its normal form.
+
+Pause events also appear in `s.activity`, for example (timestamps omitted):
+
+```text
+<*> preparing to pause Geri
+<01> connection closed
+<C02> connection closed
+<*> Geri paused
+```
+
+System entries use `<*>`; connection entries identify posting, checking (`C`)
+or repair (`R`) workers. A control event has this abbreviated shape:
+
+```elixir
+%{kind: :control, timestamp: ~T[12:34:56], worker: nil, message: "Geri paused"}
+```
+
+It has no filename or part fields. If the user resumes during `:pausing`, the
+coordinator returns to `:running` and records “Geri resumed”; it does not later
+report a completed pause. `q`/Escape resumes paused work before hiding the TUI.
+Cancellation cannot be resumed by hiding it.
 
 Inspect coordinator state:
 

@@ -69,6 +69,7 @@ defmodule Geri.JobState do
   def result(job, verification_errors \\ []), do: GenServer.call(job, {:result, verification_errors}, :infinity)
   def failure_info(job), do: GenServer.call(job, :failure_info, :infinity)
   def snapshot(job), do: GenServer.call(job, :snapshot, :infinity)
+  def activity(job, message, worker \\ nil), do: GenServer.cast(job, {:activity, message, worker})
   def finalize(job), do: GenServer.call(job, :finalize, :infinity)
   def abort(job), do: GenServer.call(job, :abort, :infinity)
 
@@ -222,6 +223,13 @@ defmodule Geri.JobState do
   end
 
   @impl true
+  def handle_cast({:activity, message, worker}, state) do
+    event = %{kind: :control, timestamp: Time.utc_now() |> Time.truncate(:second),
+              message: message, worker: worker}
+    Logger.info("#{if worker, do: "worker #{worker}: ", else: ""}#{message}")
+    {:noreply, put_in(state.ui.activity, [event | state.ui.activity] |> Enum.take(@activity_limit))}
+  end
+
   def handle_cast({:finish_verification_file, number}, state) do
     state = %{state | verification: Geri.Verification.finish_file(state.verification, number)}
     {:noreply, state}

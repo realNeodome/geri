@@ -59,7 +59,7 @@ if System.get_env("GERI_TUI") != "false" do
          job: job,
          control: Keyword.get(opts, :control),
          terminal: Keyword.get(opts, :terminal),
-         mode: :running,
+         mode: Geri.Control.mode(Keyword.get(opts, :control)),
          snapshot: snapshot,
          sampled_at: now,
          sampled_bytes: snapshot.progress.posted_bytes,
@@ -154,6 +154,11 @@ if System.get_env("GERI_TUI") != "false" do
     end
 
     defp outer_frame(snapshot, mode, width) do
+      mode = case mode do
+        :pausing -> "PAUSING"
+        :paused -> "PAUSED"
+        mode -> to_string(mode)
+      end
       %Block{
         title: job_title("#{mode}: #{snapshot.key}", max(width - 4, 0)),
         borders: [:all],
@@ -475,6 +480,21 @@ if System.get_env("GERI_TUI") != "false" do
         items: items,
         direction: :bottom_to_top
       }
+    end
+
+    defp activity_line(%{kind: :control} = event, snapshot, width) do
+      marker = case event.worker do
+        nil -> "*"
+        worker when is_integer(worker) -> padded_number(worker, digit_width(snapshot.connections))
+        "C" <> number -> "C" <> String.pad_leading(number, digit_width(max(snapshot.check_connections, 1)), "0")
+        worker -> to_string(worker)
+      end
+      spans = [
+        Span.new(format_time(event.timestamp), style: @timestamp_style),
+        Span.new(" <#{marker}> ", style: @worker_style),
+        Span.new(event.message, style: @field_style)
+      ]
+      Line.new(truncate_spans(spans, width, &Text.take/2))
     end
 
     defp activity_line(%{kind: :posted} = event, snapshot, width) do

@@ -15,7 +15,7 @@ if System.get_env("GERI_TUI") != "false" do
         when not is_nil(control) do
       case Geri.Control.mode(control) do
         :running -> Geri.Control.pause(control)
-        :paused -> Geri.Control.resume(control)
+        mode when mode in [:pausing, :paused] -> Geri.Control.resume(control)
         :cancelled -> :ok
       end
       {:noreply, state}
@@ -39,6 +39,8 @@ if System.get_env("GERI_TUI") != "false" do
                "Q",
                "esc"
              ] do
+      # Once hidden, the normal keyboard resume controls are no longer available.
+      if control = state[:control], do: Geri.Control.resume(control)
       {:stop, state}
     end
 
