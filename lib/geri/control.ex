@@ -44,7 +44,8 @@ defmodule Geri.Control do
 
   def handle_call({:queue, queue}, _from, state) do
     if state.mode == :cancelled, do: abort_queue(queue)
-    {:reply, :ok, %{state | queues: [queue | state.queues]}}
+    unless queue in state.queues, do: Process.monitor(queue)
+    {:reply, :ok, %{state | queues: Enum.uniq([queue | state.queues])}}
   end
 
   def handle_call(:pause, _from, %{mode: :cancelled} = state), do: {:reply, {:error, :cancelled}, state}
@@ -118,6 +119,7 @@ defmodule Geri.Control do
   @impl true
   def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
     state = remove_actor(state, pid)
+    state = %{state | queues: List.delete(state.queues, pid)}
     {:noreply, %{state | waiters: Enum.reject(state.waiters, fn {{waiting, _}, _} -> waiting == pid end)}}
   end
 

@@ -61,6 +61,8 @@ defmodule Geri.Checker do
         repairs: [],
         repairing: false,
         repair_pid: nil,
+        repair_producer: nil,
+        repair_file: nil,
         repair_errors: []
       }
 
@@ -150,25 +152,29 @@ defmodule Geri.Checker do
     {:noreply, state}
   end
 
-  def handle_info({:repair_finished, file_number, result}, state) do
-    case result do
-      :ok ->
-        Logger.info("repair pass completed")
-
-      {:error, reason} ->
-        Logger.error("repair pass failed: #{inspect(reason)}")
-    end
-
+  def handle_info({:repair_finished, pid, file_number, producer}, %{repair_pid: pid} = state) do
+    Logger.info("repair pass completed")
     :ok = Geri.JobState.finish_verification_file(state.job, file_number)
 
-    state =
-      state
-      |> Map.put(:repairing, false)
-      |> Map.put(:repair_pid, nil)
-      |> record_repair_error(result)
-      |> maybe_start_repair()
-      |> maybe_finish()
+    state = %{state | repairing: false, repair_file: nil, repair_producer: producer}
+    {:noreply, state |> maybe_start_repair() |> maybe_finish()}
+  end
 
+  # A cancelled pool may finish before its producer's last notification arrives.
+  def handle_info({:repair_finished, _pid, _file_number, _producer}, state), do: {:noreply, state}
+
+  def handle_info({:repair_pool_finished, pid, result}, %{repair_pid: pid} = state) do
+    if state.repair_file do
+      :ok = Geri.JobState.finish_verification_file(state.job, state.repair_file)
+    end
+
+    case result do
+      {:error, reason} -> Logger.error("repair pass failed: #{inspect(reason)}")
+      :ok -> :ok
+    end
+
+    state = %{state | repairing: false, repair_pid: nil, repair_producer: nil, repair_file: nil}
+    state = state |> record_repair_error(result) |> maybe_start_repair() |> maybe_finish()
     {:noreply, state}
   end
 
@@ -340,18 +346,24 @@ defmodule Geri.Checker do
 
   defp start_repair(state) do
     [items | remaining] = state.repairs
-    parent = self()
-    article_opts = Keyword.fetch!(state.opts, :article_opts)
-    repair_opts = Keyword.fetch!(state.opts, :repair_opts)
-
     Logger.info("repairing #{length(items)} missing articles from #{hd(items).filename}")
 
-    pid = spawn_link(fn ->
-      result = Geri.repair(items, state.job, repair_opts, article_opts)
-      send(parent, {:repair_finished, hd(items).file_number, result})
-    end)
+    pid =
+      if state.repair_pid do
+        send(state.repair_producer, {:repair, items})
+        state.repair_pid
+      else
+        parent = self()
+        article_opts = Keyword.fetch!(state.opts, :article_opts)
+        repair_opts = Keyword.fetch!(state.opts, :repair_opts)
 
-    %{state | repairing: true, repair_pid: pid, repairs: remaining}
+        spawn_link(fn ->
+          result = Geri.repair_session(items, state.job, repair_opts, article_opts, parent)
+          send(parent, {:repair_pool_finished, self(), result})
+        end)
+      end
+
+    %{state | repairing: true, repair_pid: pid, repair_file: hd(items).file_number, repairs: remaining}
   end
 
   defp record_repair_error(state, :ok), do: state
@@ -366,9 +378,16 @@ defmodule Geri.Checker do
       not state.accepting and state.inflight == 0 and
          :gb_trees.is_empty(state.queue) and not state.repairing and
          state.repairs == [] and map_size(state.files) == 0 ->
-      result = Geri.JobState.result(state.job, Enum.reverse(state.repair_errors))
-      Enum.each(state.finish_waiters, &GenServer.reply(&1, result))
-      %{state | finish_waiters: []}
+        if state.repair_pid do
+          # All checks and file batches have finished; no producer can add work.
+          # Wait for the pool to drain and close its connections before replying.
+          send(state.repair_producer, :finish)
+          %{state | repairing: true}
+        else
+          result = Geri.JobState.result(state.job, Enum.reverse(state.repair_errors))
+          Enum.each(state.finish_waiters, &GenServer.reply(&1, result))
+          %{state | finish_waiters: []}
+        end
       true ->
       state
     end

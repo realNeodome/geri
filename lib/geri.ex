@@ -190,6 +190,8 @@ defmodule Geri do
   defp run_batch(queue, job, connections, opts, role, produce) do
     producer = Task.async(fn -> finish_production(queue, produce.()) end)
 
+    opts = if opts[:repair_notify], do: Keyword.put(opts, :repair_notify, producer.pid), else: opts
+
     workers =
       for worker <- 1..connections do
         Task.async(fn -> posting_worker(queue, job, worker, opts, role) end)
@@ -240,6 +242,8 @@ defmodule Geri do
   end
 
   defp stop_batch(pending, control, :repair, {:error, :cancelled} = error) do
+    # Wake a persistent repair producer waiting for its next batch or results.
+    Enum.each(pending, fn {_ref, task} -> send(task.pid, {:cancelled, control}) end)
     # User cancellation retains Control's grace period for active operations.
     await_batch(pending, control, :repair, error)
   end
@@ -389,6 +393,7 @@ defmodule Geri do
           {:ok, conn} ->
             case record_post(role, job, part, article, item, worker, opts) do
               :ok ->
+                if notify = opts[:repair_notify], do: send(notify, :repair_item_finished)
                 posting_loop(queue, job, conn, worker, opts, role)
 
               {:error, reason} ->
@@ -399,6 +404,7 @@ defmodule Geri do
           {:error, reason, conn} ->
             case record_post_failure(role, job, item, article, worker, reason) do
               :ok ->
+                if notify = opts[:repair_notify], do: send(notify, :repair_item_finished)
                 posting_loop(queue, job, conn, worker, opts, role)
 
               {:error, reason} ->
@@ -865,18 +871,56 @@ defmodule Geri do
 
 
   def repair(items, job, repair_opts, article_opts) when is_list(items) do
+    run_repairs(job, repair_opts, fn queue ->
+      produce_repairs(queue, items, article_opts)
+    end)
+  end
+
+  # The checker owns the lifetime; file batches share this queue and pool.
+  @doc false
+  def repair_session(items, job, repair_opts, article_opts, owner) do
+    pool = self()
+    repair_opts = Keyword.put(repair_opts, :repair_notify, true)
+    run_repairs(job, repair_opts, fn queue ->
+      produce_repair_batches(queue, items, article_opts, owner, pool)
+    end)
+  end
+
+  defp run_repairs(job, repair_opts, produce) do
     connections = Keyword.get(repair_opts, :repair_connections, 2)
 
     with :ok <- validate_connections(connections),
          {:ok, queue} <- Geri.Queue.start_link(connections * 2) do
       if repair_opts[:control], do: Geri.Control.register_queue(repair_opts[:control], queue)
       try do
-        run_batch(queue, job, connections, repair_opts, :repair, fn ->
-          produce_repairs(queue, items, article_opts)
-        end)
+        run_batch(queue, job, connections, repair_opts, :repair, fn -> produce.(queue) end)
       after
         GenServer.stop(queue)
       end
+    end
+  end
+
+  defp produce_repair_batches(queue, items, article_opts, owner, pool) do
+    with :ok <- produce_repairs(queue, items, article_opts),
+         :ok <- await_repair_results(length(items)) do
+      # Workers acknowledge only after updating JobState. It is now safe to
+      # fold this file's verification results, even while the pool stays open.
+      send(owner, {:repair_finished, pool, hd(items).file_number, self()})
+
+      receive do
+        {:repair, items} -> produce_repair_batches(queue, items, article_opts, owner, pool)
+        :finish -> :ok
+        {:cancelled, _control} -> {:error, :cancelled}
+      end
+    end
+  end
+
+  defp await_repair_results(0), do: :ok
+
+  defp await_repair_results(remaining) do
+    receive do
+      :repair_item_finished -> await_repair_results(remaining - 1)
+      {:cancelled, _control} -> {:error, :cancelled}
     end
   end
 

@@ -180,6 +180,12 @@ geri upload \
   --nzb upload-abc.nzb --no-tui -- ./*.bin
 ```
 
+In both ABB and ABC uploads, repair workers start when the first repair batch is needed and share one queue
+and pool across files. Connections open only when a worker has an article to
+post and remain available for later batches. The pool closes after verification
+and all repair batches finish. Pausing closes idle connections; workers reconnect
+when needed after resuming.
+
 ## Upload controls
 
 The `geri` and `./geri.sh` launchers handle Ctrl-C without the Erlang break
