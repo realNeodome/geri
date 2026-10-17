@@ -523,27 +523,8 @@ defmodule Geri.Checker do
     end
   end
 
-  defp ensure_connection(nil, opts), do: connect(opts)
+  defp ensure_connection(nil, opts), do: Geri.Session.connect(opts)
   defp ensure_connection(conn, _opts), do: {:ok, conn}
-
-  defp connect(opts) do
-    with {:ok, conn} <- Geri.NNTP.connect(opts),
-         :ok <- Geri.Control.connected(opts[:control], conn) do
-      case Geri.NNTP.authenticate(
-             conn,
-             Keyword.get(opts, :username),
-             Keyword.get(opts, :password),
-             opts
-           ) do
-        :ok ->
-          {:ok, conn}
-
-        {:error, reason} ->
-          Geri.NNTP.close(conn)
-          {:error, reason}
-      end
-    end
-  end
 
   defp close_connection(nil), do: :ok
   defp close_connection(conn), do: Geri.NNTP.close(conn)

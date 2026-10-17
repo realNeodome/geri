@@ -88,6 +88,7 @@ All library paths in this table are relative to the repository root.
 | `lib/geri/article.ex` | Article headers and deterministic Message-ID generation |
 | `lib/geri/header.ex`, `lib/geri/filename.ex` | Header encoding and filename validation, with different text contracts |
 | `lib/geri/nntp.ex` | TCP/TLS setup, greetings, reader mode, authentication, NNTP commands, framing and dot transparency |
+| `lib/geri/session.ex` | Shared connection setup, Control registration before authentication, and authentication-failure closure; no admission or retry policy |
 | `lib/geri/queue.ex` | Blocking bounded FIFO, orderly close, and abort |
 | `lib/geri/job_state.ex` | Single owner of progress, recovery, verification accounting, NZB buffering, and inspection snapshots |
 | `lib/geri/verification.ex` | Pure verification-accounting transformations; no process or sockets |
@@ -308,8 +309,9 @@ then applies XML escaping. MIME encoding and XML escaping are different steps.
 `Geri.NNTP` handles protocol operations; `Geri` decides what an operation's
 outcome means for an upload. TCP and TLS sockets are passive line-mode sockets.
 Connection setup includes the greeting and optional MODE READER; authentication
-follows in the worker. STARTTLS reads the initial greeting on raw TCP, upgrades,
-and then performs reader-mode setup. Do not casually reorder these stages.
+follows through `Geri.Session.connect/1` in the worker. STARTTLS reads the initial
+greeting on raw TCP, upgrades, and then performs reader-mode setup. Do not
+casually reorder these stages.
 
 Status responses are bounded to 512 bytes, require CRLF, and are parsed before
 being returned to the caller. `recv_response/1` closes a connection after an
@@ -319,9 +321,21 @@ answer to a later command on that connection.
 A network operation follows Control checkout, lazy connection establishment,
 registration, authentication as needed, operation, and checkin. Checkout returns
 the registry's connection for an existing actor, which may be `nil` after a
-pause. The worker's cached variable is not authoritative. Current code registers
-connections in overlapping setup/reconnect paths; an extraction must preserve
-registration before authentication and checkin/closure on all outcomes.
+pause. The worker's cached variable is not authoritative.
+
+`Geri.Session.connect/1` owns the shared setup/registration/authentication
+sequence and returns the original error shapes. It requires caller checkout
+when Control is present and does not check in or retry on the caller's behalf.
+Authentication failure closes the socket; failed registration after cancellation
+is closed by Control. Transport/greeting/TLS failures remain NNTP's responsibility.
+
+Posting retains an additional registration check after setup/authentication,
+both initially and during reconnect recovery. These are cancellation checks:
+authentication may succeed after cancellation was requested. Reused posting
+connections also pass the outer check before STAT/POST. The checker retains its
+existing operation boundary and checks cancellation after its operation/checkin;
+sharing setup does not merge those policies. Do not remove registration merely
+because the same socket was registered before AUTHINFO.
 
 | Posting observation | Current action |
 | --- | --- |
@@ -743,6 +757,7 @@ contract.
 | --- | --- |
 | Identity and reconstruction | `article_identity_test.exs`, `source_integrity_test.exs`, `yenc_wrapping_test.exs`, `unicode_headers_test.exs` |
 | Common validation and role resolution | `options_test.exs`, `auth_test.exs`, `auth_roles_test.exs`, `server_display_test.exs` |
+| Shared setup and registration/authentication lifetime | `session_test.exs`, `auth_roles_test.exs`, `control_test.exs` |
 | Response grammar and uncertain posting | `nntp_response_test.exs`, `stat_recovery_test.exs`, `upload_duplicates_test.exs` |
 | Task failure and scoped shutdown | `task_failure_test.exs`, `upload_shutdown_test.exs`, `repair_shutdown_test.exs`, `checker_failure_test.exs` |
 | Repair-session reuse and completion | `repair_pool_test.exs`, `verification_test.exs`, `failure_reporting_test.exs` |

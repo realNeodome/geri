@@ -621,6 +621,8 @@ defmodule Geri do
     case Geri.Control.checkout(control, conn, opts[:worker]) do
       {:error, reason} -> {:error, reason, nil}
       {:ok, conn} ->
+        # Session setup registers before AUTHINFO. Recheck afterwards (also for
+        # reused sockets): cancellation may have arrived during authentication.
         result = with {:ok, conn} <- ensure_post_connection(conn, opts),
                       :ok <- Geri.Control.connected(control, conn) do
           operation.(conn)
@@ -636,7 +638,7 @@ defmodule Geri do
     end
   end
 
-  defp ensure_post_connection(nil, opts), do: connect(opts)
+  defp ensure_post_connection(nil, opts), do: Geri.Session.connect(opts)
   defp ensure_post_connection(conn, _opts), do: {:ok, conn}
 
   defp upload_part(conn, part, article, worker, opts) do
@@ -759,8 +761,10 @@ defmodule Geri do
 
     with {:ok, _} <- Geri.Control.checkout(opts[:control], nil, opts[:worker]) do
       Logger.warning("worker #{worker} reconnecting")
-      case connect(opts) do
+      case Geri.Session.connect(opts) do
         {:ok, conn} ->
+          # Preserve the same post-authentication cancellation check as the
+          # initial posting path before issuing recovery STAT or POST.
           case Geri.Control.connected(opts[:control], conn) do
             :ok ->
               Logger.info("worker #{worker} reconnected")
@@ -773,40 +777,6 @@ defmodule Geri do
           with :ok <- Geri.Control.wait(opts[:control], delay) do
             reconnect(worker, opts)
           end
-      end
-    end
-  end
-
-  # Register the established socket before authentication so cancellation can
-  # interrupt AUTHINFO. NNTP.connect still owns setup/greeting failures before
-  # returning a connection that can be registered here.
-  defp connect(opts) do
-    with {:ok, conn} <-
-           Geri.NNTP.connect(
-             opts
-           ),
-         :ok <- Geri.Control.connected(opts[:control], conn) do
-      case Geri.NNTP.authenticate(
-             conn,
-             Keyword.get(
-               opts,
-               :username
-             ),
-             Keyword.get(
-               opts,
-               :password
-             ),
-             opts
-           ) do
-        :ok ->
-          {:ok, conn}
-
-        {:error, _reason} = error ->
-          Geri.NNTP.close(
-            conn
-          )
-
-          error
       end
     end
   end
