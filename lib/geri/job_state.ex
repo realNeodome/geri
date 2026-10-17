@@ -478,36 +478,20 @@ defmodule Geri.JobState do
   end
 
   defp mark_check_present(state, item, checker) do
-    state =
-      if is_nil(state.ui.checked_bytes) do
-        state
-      else
-        update_in(state.ui.checked_bytes, &(&1 + item.source_size))
-      end
-
-    state =
-      case Map.fetch(state.ui.files, item.file_number) do
-        :error ->
-          state
-
-        {:ok, file} ->
-          checked_bytes =
-            min(
-              (file.checked_bytes || 0) + item.source_size,
-              file.total_bytes || item.source_size
-            )
-
-          checked_parts =
-            min((file.checked_parts || 0) + 1, file.total_parts || item.part_total)
-
-          file = %{file | checked_bytes: checked_bytes, checked_parts: checked_parts}
-          put_in(state.ui.files[item.file_number], file)
-      end
-
-    add_check_activity(state, :checked, item, checker)
+    state
+    |> update_checked_progress(item)
+    |> add_check_activity(:checked, item, checker)
   end
 
   defp mark_repair_present(state, item, worker) do
+    state
+    |> update_checked_progress(item)
+    |> add_repair_activity(:repaired, item, worker)
+  end
+
+  # record_verification gates duplicates before either caller reaches here.
+  # Both outcomes advance checked progress; an evicted UI row stays evicted.
+  defp update_checked_progress(state, item) do
     state =
       if is_nil(state.ui.checked_bytes) do
         state
@@ -515,26 +499,23 @@ defmodule Geri.JobState do
         update_in(state.ui.checked_bytes, &(&1 + item.source_size))
       end
 
-    state =
-      case Map.fetch(state.ui.files, item.file_number) do
-        :error ->
-          state
+    case Map.fetch(state.ui.files, item.file_number) do
+      :error ->
+        state
 
-        {:ok, file} ->
-          checked_bytes =
-            min(
-              (file.checked_bytes || 0) + item.source_size,
-              file.total_bytes || item.source_size
-            )
+      {:ok, file} ->
+        checked_bytes =
+          min(
+            (file.checked_bytes || 0) + item.source_size,
+            file.total_bytes || item.source_size
+          )
 
-          checked_parts =
-            min((file.checked_parts || 0) + 1, file.total_parts || item.part_total)
+        checked_parts =
+          min((file.checked_parts || 0) + 1, file.total_parts || item.part_total)
 
-          file = %{file | checked_bytes: checked_bytes, checked_parts: checked_parts}
-          put_in(state.ui.files[item.file_number], file)
-      end
-
-    add_repair_activity(state, :repaired, item, worker)
+        file = %{file | checked_bytes: checked_bytes, checked_parts: checked_parts}
+        put_in(state.ui.files[item.file_number], file)
+    end
   end
 
   defp add_repair_activity(state, kind, item, worker) do
