@@ -463,8 +463,8 @@ defmodule Geri.Checker do
   # repair_file names the current batch. Between batches the session can remain
   # alive with repair_status :idle and no active file or queued articles.
   defp start_repair(state) do
-    [items | remaining] = state.repairs
-    Logger.info("repairing #{length(items)} missing articles from #{hd(items).filename}")
+    [[first | _] = items | remaining] = state.repairs
+    Logger.info("repairing #{length(items)} missing articles from #{first.filename}")
 
     pid =
       if state.repair_pid do
@@ -481,7 +481,13 @@ defmodule Geri.Checker do
         end)
       end
 
-    %{state | repair_status: :repairing, repair_pid: pid, repair_file: hd(items).file_number, repairs: remaining}
+    %{
+      state
+      | repair_status: :repairing,
+        repair_pid: pid,
+        repair_file: first.file_number,
+        repairs: remaining
+    }
   end
 
   defp record_repair_error(state, :ok), do: state

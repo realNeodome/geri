@@ -175,6 +175,58 @@ defmodule Geri.ArticleIdentityTest do
     end
   end
 
+  test "direct repair accepts several files without the single-file session handshake", %{dir: dir} do
+    parts =
+      for {subdir, binary, number} <- [{"first", "a", 1}, {"second", "b", 2}] do
+        part = encoded_part(dir, subdir, binary, :base64, 57)
+        path = Path.join([dir, subdir, "same.bin"])
+        {path, Map.merge(part, %{file_number: number, file_total: 2, offset: 0})}
+      end
+
+    items =
+      Enum.map(parts, fn {path, part} ->
+        part
+        |> Map.delete(:body)
+        |> Map.merge(%{path: path, part_total: part.total, message_id: article(part).message_id})
+      end)
+
+    {:ok, listener} =
+      :gen_tcp.listen(0, [:binary, active: false, packet: :line, ip: {127, 0, 0, 1}])
+
+    {:ok, {_, port}} = :inet.sockname(listener)
+
+    server =
+      Task.async(fn ->
+        {:ok, socket} = :gen_tcp.accept(listener, 5_000)
+
+        try do
+          :ok = :gen_tcp.send(socket, "200 ready\r\n")
+          receive_posts(socket, [])
+        after
+          :gen_tcp.close(socket)
+        end
+      end)
+
+    {:ok, job} = Geri.JobState.start_link("fixed-key", Enum.map(parts, &elem(&1, 0)), @opts)
+
+    try do
+      assert :ok =
+               Geri.repair(
+                 items,
+                 job,
+                 [host: "127.0.0.1", port: port, tls: :none, repair_connections: 1],
+                 @opts
+               )
+
+      assert Enum.sort(Task.await(server, 5_000)) == Enum.sort(Enum.map(items, & &1.message_id))
+      assert Geri.JobState.verification(job).repaired == 2
+    after
+      GenServer.stop(job)
+      :gen_tcp.close(listener)
+      if Process.alive?(server.pid), do: Task.shutdown(server, :brutal_kill)
+    end
+  end
+
   defp receive_posts(socket, ids) do
     case :gen_tcp.recv(socket, 0, 5000) do
       {:ok, "POST\r\n"} ->

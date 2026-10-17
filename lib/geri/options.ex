@@ -1,5 +1,12 @@
 defmodule Geri.Options do
-  @moduledoc false
+  @moduledoc """
+  Validates upload inputs and resolves effective endpoint settings.
+
+  Endpoint helpers accept unresolved or resolved keyword options so execution
+  and JobState display use the same defaults. They perform no network or
+  credential lookup; repair's independent-endpoint flag guides credential
+  inheritance in Geri.
+  """
 
   def normalize(paths, opts) do
     paths = if is_binary(paths), do: [paths], else: paths
@@ -36,6 +43,93 @@ defmodule Geri.Options do
 
       {:ok, paths, opts}
     end
+  end
+
+  @doc "Returns the effective posting address and transport."
+  @spec posting_endpoint(keyword()) :: keyword()
+  def posting_endpoint(opts) do
+    tls = Keyword.get(opts, :tls, :implicit)
+    [host: opts[:host], port: opts[:port] || default_port(tls), tls: tls]
+  end
+
+  @doc "Returns checking session settings, or nil when checking is disabled."
+  @spec check_endpoint(keyword()) :: keyword() | nil
+  def check_endpoint(opts) do
+    case opts[:check_host] do
+      nil ->
+        nil
+
+      host ->
+        tls = Keyword.get(opts, :check_tls, :implicit)
+
+        [
+          host: host,
+          port: opts[:check_port] || default_port(tls),
+          tls: tls,
+          reader: Keyword.get(opts, :check_reader, false),
+          tls_verify: Keyword.get(opts, :check_tls_verify, :peer),
+          tls_ca_file: opts[:check_tls_ca_file]
+        ]
+    end
+  end
+
+  # A different listener or transport is a separate repair endpoint even when
+  # its hostname is inherited. Only ABB inherits B's session defaults and login.
+  @doc "Returns repair independence and settings, or {false, nil} without checking."
+  @spec repair_endpoint(keyword()) :: {boolean(), keyword() | nil}
+  def repair_endpoint(opts) do
+    case check_endpoint(opts) do
+      nil ->
+        {false, nil}
+
+      checking ->
+        # Resolve B locally as callers may not have passed through auth setup.
+        opts = Keyword.merge(opts, check_port: checking[:port], check_tls: checking[:tls])
+        resolve_repair_endpoint(opts)
+    end
+  end
+
+  defp resolve_repair_endpoint(opts) do
+    separate_listener =
+      not is_nil(opts[:repair_host]) or
+        (not is_nil(opts[:repair_port]) and opts[:repair_port] != opts[:check_port])
+
+    tls =
+      Keyword.get(opts, :repair_tls, if(separate_listener, do: :implicit, else: opts[:check_tls]))
+
+    port =
+      Keyword.get(
+        opts,
+        :repair_port,
+        if(separate_listener or tls != opts[:check_tls],
+          do: default_port(tls),
+          else: opts[:check_port]
+        )
+      )
+
+    separate = separate_listener or tls != opts[:check_tls]
+
+    defaults =
+      if separate do
+        [reader: false, tls_verify: :peer, tls_ca_file: nil]
+      else
+        [
+          reader: Keyword.get(opts, :check_reader, false),
+          tls_verify: Keyword.get(opts, :check_tls_verify, :peer),
+          tls_ca_file: opts[:check_tls_ca_file]
+        ]
+      end
+
+    endpoint = [
+      host: opts[:repair_host] || opts[:check_host],
+      port: port,
+      tls: tls,
+      reader: Keyword.get(opts, :repair_reader, defaults[:reader]),
+      tls_verify: Keyword.get(opts, :repair_tls_verify, defaults[:tls_verify]),
+      tls_ca_file: Keyword.get(opts, :repair_tls_ca_file, defaults[:tls_ca_file])
+    ]
+
+    {separate, endpoint}
   end
 
   defp keyword_options(opts) do

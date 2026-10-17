@@ -68,6 +68,44 @@ defmodule Geri.OptionsTest do
     end
   end
 
+  test "endpoint selection accepts unresolved settings without credential lookup" do
+    opts = [
+      check_host: "b.invalid",
+      check_port: 9118,
+      check_reader: true,
+      check_tls_verify: :none,
+      check_tls_ca_file: "b.pem"
+    ]
+
+    checking = Geri.Options.check_endpoint(opts)
+    assert checking[:tls] == :implicit
+    assert checking[:port] == 9118
+
+    assert {false, inherited} = Geri.Options.repair_endpoint(opts)
+    assert inherited == checking
+
+    assert {true, independent} =
+             Geri.Options.repair_endpoint(Keyword.put(opts, :repair_tls, :none))
+
+    assert independent == [
+             host: "b.invalid",
+             port: 119,
+             tls: :none,
+             reader: false,
+             tls_verify: :peer,
+             tls_ca_file: nil
+           ]
+
+    assert {false, overridden} =
+             Geri.Options.repair_endpoint(Keyword.put(opts, :repair_reader, false))
+
+    assert overridden[:reader] == false
+    assert overridden[:port] == 9118
+
+    assert Geri.Options.check_endpoint([]) == nil
+    assert Geri.Options.repair_endpoint(repair_host: "unused.invalid") == {false, nil}
+  end
+
   test "invalid options return errors before NZB creation or authentication lookup", c do
     for {key, value} <- [
           port: 65536,

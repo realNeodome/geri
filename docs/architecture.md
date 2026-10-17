@@ -81,7 +81,7 @@ All library paths in this table are relative to the repository root.
 | Source | Responsibility |
 | --- | --- |
 | `lib/geri.ex` | Public upload entry point, resource lifetime, production, shared posting/repair task machinery, posting recovery, repair reconstruction, role-option resolution |
-| `lib/geri/options.ex` | Common upload-option validation and normalization before job resources are opened |
+| `lib/geri/options.ex` | Common upload-option validation/normalization and shared effective endpoint selection for execution and display |
 | `lib/geri/auth.ex` | Auth-file parsing, entry selection, and credential-pair validation |
 | `lib/geri/encoder/source.ex` | Streaming reads with initial-size and EOF checks |
 | `lib/geri/encoder/{yenc,base64,uuencode}.ex` | Part boundaries, encoding, and encoding-specific metadata |
@@ -134,7 +134,7 @@ permanent upload supervision tree and no automatic job restart.
 | JobState | Linked to the upload caller after successful initialization; owns the NZB writer and bookkeeping |
 | Control | Linked to the upload caller; monitors registered actors and queues |
 | Posting queue | Job-scoped GenServer; closed by producer completion, stopped by outer cleanup |
-| Posting task supervisor | Temporary scope in `run_batch/6`; owns producer/worker tasks |
+| Posting task supervisor | Temporary scope in `run_batch/7`; owns producer/worker tasks |
 | Posting producer/workers | `Task.Supervisor.async_nolink` tasks monitored by the batch owner |
 | Checker | Job-scoped GenServer linked to its caller; traps exits from its children |
 | Check workers | Linked processes created by Checker; no replacement worker is started after a crash |
@@ -167,7 +167,18 @@ A, B, and repair credentials are resolved before work begins. Resolved repair
 settings are passed to Checker through `checker_options/1`; they must not be
 reinterpreted there with different inheritance rules.
 
-`repair_endpoint/1` currently distinguishes these cases:
+`Geri.Options` owns the pure endpoint-selection rules. Its `posting_endpoint/1`
+and `check_endpoint/1` return effective addresses/transports; checking also
+includes reader/TLS session settings, or returns nil when disabled.
+`repair_endpoint/1` returns `{independent?, endpoint}`, with `{false, nil}` when
+checking is disabled. These helpers accept unresolved or resolved options and
+perform no credential lookup or network I/O. Upload setup resolves credentials
+against their selected endpoint; JobState projects their addresses for display
+instead of maintaining another set of port/inheritance rules. In particular,
+changing repair transport selects its standard port even when B has a custom
+port, unless a repair port was supplied explicitly.
+
+`Geri.Options.repair_endpoint/1` distinguishes these cases:
 
 | Configuration | Repair behavior |
 | --- | --- |
@@ -384,6 +395,12 @@ Supplying an upload key enables preliminary STAT for every initial posting
 item. Misses do not disable later preliminary STATs. Repair skips that initial
 preflight, but shares rejection checking and uncertain-POST recovery.
 
+The protocol/reconnect functions receive the article, not the encoded part
+map: they need its Message-ID and serialized bytes. The worker loop retains
+part metadata for JobState updates. Success and ordinary repair failure select
+different recording operations, then share one acknowledgement/continue/abort
+path. Normal posting consumes the group list already normalized by Options.
+
 Initial connection failure ends that posting operation. After a transport
 failure enters reconnect recovery, failed reconnections repeat with a fixed
 configured delay and no overall retry budget. `Control.wait/2` makes that delay
@@ -522,11 +539,19 @@ connections. An empty repair queue does not mean future repair work is impossibl
 workers can wait for more batches. No missing articles means no repair pool.
 
 `produce_repairs/3` groups items by path and sorts each file's items by offset.
+The direct `Geri.repair/4` entry can handle several files. The persistent
+session's batch protocol is narrower: Checker supplies a nonempty list from
+one file, and the first item's file number identifies that entire batch.
+Grouping inside the producer does not relax this handshake requirement.
 `produce_repair_file/3` opens a raw binary file, uses positioned reads, requires
 the exact source size, verifies the recorded hash, rebuilds encoding metadata,
 and checks that `Article.build/2` generates the original Message-ID before
 queueing. yEnc running CRC metadata comes from the original item; repairing a
 later part does not require re-reading all earlier parts to recalculate it.
+Common reconstruction fields are assembled once; encoding-specific branches
+only add their body and metadata. After the source hash matches, reconstruction
+reuses that verified hash for the same immutable binary instead of hashing the
+slice again. The original Message-ID comparison remains a separate check.
 
 The completion handshake is deliberately stronger than draining the queue:
 
@@ -550,6 +575,10 @@ An item no longer in the queue may still be in flight. The producer waits for
 one acknowledgement per batch item, including recorded per-article repair
 failures. Only then may Checker fold that file's accounting. This prevents a
 late repair result from being rejected as belonging to an already finished file.
+Task creation takes an explicit acknowledgement flag for persistent sessions
+and passes the resulting producer PID directly to workers. Ordinary posting and
+direct repair have no result recipient. No option changes from a boolean flag
+to a PID during startup, and no acknowledgement precedes JobState recording.
 
 Checker uses `repair_status` for the repair phase and separate fields for
 resources: `repair_pid` identifies the session owner, `repair_producer` receives

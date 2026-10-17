@@ -124,6 +124,9 @@ defmodule Geri.JobState do
   def init({upload_key, paths, opts}) do
     with {:ok, total_bytes} <- total_file_size(paths),
          {:ok, nzb} <- open_nzb(opts) do
+      checking = Geri.Options.check_endpoint(opts)
+      {_independent, repair} = Geri.Options.repair_endpoint(opts)
+
       state = %{
         job: %{
           key: upload_key,
@@ -136,8 +139,8 @@ defmodule Geri.JobState do
           from: Geri.Header.display_from(Keyword.fetch!(opts, :from), Keyword.get(opts, :name)),
           comment: Keyword.get(opts, :comment),
           connections: Keyword.get(opts, :connections, Geri.defaults()[:connections]),
-          checking_server: checking_server_config(opts),
-          repair_server: repair_server_config(opts),
+          checking_server: server_address(checking),
+          repair_server: server_address(repair),
           checking_connections: Keyword.get(opts, :check_connections, 2)
         },
         posting: posting_config(opts),
@@ -149,7 +152,7 @@ defmodule Geri.JobState do
         ui: %{
           active_file: 1,
           posted_bytes: 0,
-          checked_bytes: if(checking_server_config(opts), do: 0, else: nil),
+          checked_bytes: if(checking, do: 0, else: nil),
           files: initial_ui_files(paths),
           activity: []
         }
@@ -773,36 +776,19 @@ defmodule Geri.JobState do
     }
   end
 
-  defp checking_server_config(opts) do
-    case Keyword.get(opts, :check_host) do
-      nil ->
-        nil
-
-      host ->
-        tls = Keyword.get(opts, :check_tls, :implicit)
-
-        %{
-          host: host,
-          port: Keyword.get(opts, :check_port) || default_port(tls)
-        }
-    end
-  end
+  defp server_address(nil), do: nil
+  defp server_address(endpoint), do: %{host: endpoint[:host], port: endpoint[:port]}
 
   defp posting_config(opts) do
-    tls = Keyword.get(opts, :tls, :implicit)
-
-    %{
-      host: Keyword.get(opts, :host),
-      port: Keyword.get(opts, :port) || default_port(tls),
-      tls: tls,
-      username: Keyword.get(opts, :username),
-      password: Keyword.get(opts, :password),
+    opts
+    |> Geri.Options.posting_endpoint()
+    |> Map.new()
+    |> Map.merge(%{
+      username: opts[:username],
+      password: opts[:password],
       newsgroups: Keyword.get(opts, :newsgroups, [])
-    }
+    })
   end
-
-  defp default_port(:implicit), do: 563
-  defp default_port(_tls), do: 119
 
   defp job_servers(state) do
     posting = %{
@@ -817,17 +803,6 @@ defmodule Geri.JobState do
       checking ->
         repair = state.job.repair_server
         [posting, checking] ++ if(repair == checking, do: [], else: [repair])
-    end
-  end
-
-  defp repair_server_config(opts) do
-    case checking_server_config(opts) do
-      nil -> nil
-      checking ->
-        tls = Keyword.get(opts, :repair_tls) || Keyword.get(opts, :check_tls, :implicit)
-        port = Keyword.get(opts, :repair_port) ||
-          if(Keyword.has_key?(opts, :repair_host), do: default_port(tls), else: checking.port)
-        %{host: Keyword.get(opts, :repair_host) || checking.host, port: port}
     end
   end
 

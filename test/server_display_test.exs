@@ -30,6 +30,39 @@ defmodule Geri.ServerDisplayTest do
              %{host: "c.invalid", port: 9119}
   end
 
+  test "a repair transport change replaces B's custom port with its standard port", c do
+    for tls <- [:none, :starttls] do
+      assert servers(c, check_host: "b.invalid", check_port: 9118, repair_tls: tls) ==
+               [
+                 %{host: "a.invalid", port: 563},
+                 %{host: "b.invalid", port: 9118},
+                 %{host: "b.invalid", port: 119}
+               ]
+    end
+
+    assert List.last(
+             servers(c,
+               check_host: "b.invalid",
+               check_tls: :none,
+               check_port: 9118,
+               repair_tls: :implicit
+             )
+           ) ==
+             %{host: "b.invalid", port: 563}
+  end
+
+  test "an explicit repair port still wins when its transport changes", c do
+    assert List.last(
+             servers(c,
+               check_host: "b.invalid",
+               check_port: 9118,
+               repair_tls: :none,
+               repair_port: 9119
+             )
+           ) ==
+             %{host: "b.invalid", port: 9119}
+  end
+
   test "the repair TLS mode selects its own default port", c do
     for {tls, port} <- [{:implicit, 563}, {:none, 119}, {:starttls, 119}] do
       assert List.last(servers(c, check_host: "b.invalid", check_port: 9118,

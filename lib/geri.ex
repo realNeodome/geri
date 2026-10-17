@@ -74,11 +74,7 @@ defmodule Geri do
       )
 
     opts =
-      Keyword.put(
-        opts,
-        :upload_key,
-        upload_key
-      )
+      Keyword.put(opts, :upload_key, upload_key)
 
     Logger.info(
       "upload key: #{upload_key}"
@@ -212,25 +208,28 @@ defmodule Geri do
     end)
   end
 
-  defp run_batch(queue, job, connections, opts, role, produce) do
+  defp run_batch(queue, job, connections, opts, role, produce, acknowledge_repairs? \\ false) do
     # The supervisor owns task lifetimes; monitors report crashes to this owner
     # without letting a task's exit signal kill it before cleanup and reporting.
     {:ok, supervisor} = Task.Supervisor.start_link()
 
     try do
-      producer = Task.Supervisor.async_nolink(supervisor, fn ->
-        finish_production(queue, produce.())
-      end)
+      producer =
+        Task.Supervisor.async_nolink(supervisor, fn ->
+          finish_production(queue, produce.())
+        end)
 
-      # A repair session requests acknowledgements with a flag; only after
-      # creating its producer can workers be given the actual recipient PID.
-      opts = if opts[:repair_notify], do: Keyword.put(opts, :repair_notify, producer.pid), else: opts
+      # Only persistent sessions need a per-file result barrier. Workers get
+      # the actual recipient PID; no option changes meaning during startup.
+      result_recipient = if acknowledge_repairs?, do: producer.pid
 
       workers =
         for worker <- 1..connections do
-          task = Task.Supervisor.async_nolink(supervisor, fn ->
-            posting_worker(queue, job, worker, opts, role)
-          end)
+          task =
+            Task.Supervisor.async_nolink(supervisor, fn ->
+              posting_worker(queue, job, worker, opts, role, result_recipient)
+            end)
+
           {task, {:worker, worker}}
         end
 
@@ -241,9 +240,11 @@ defmodule Geri do
         })
       end
 
-      pending = Map.new([{producer, :producer} | workers], fn {task, actor} ->
-        {task.ref, {task, actor}}
-      end)
+      pending =
+        Map.new([{producer, :producer} | workers], fn {task, actor} ->
+          {task.ref, {task, actor}}
+        end)
+
       await_batch(pending, opts[:control], role, :ok)
     after
       cleanup(fn -> Supervisor.stop(supervisor, :normal, :infinity) end)
@@ -309,123 +310,57 @@ defmodule Geri do
     error
   end
 
-  defp produce(
-         queue,
-         job,
-         paths,
-         opts
-       ) do
-    file_total =
-      length(paths)
+  defp produce(queue, job, paths, opts) do
+    file_total = length(paths)
 
     paths
     |> Enum.with_index(1)
-    |> Enum.reduce_while(
-      :ok,
-      fn {path, file_number}, :ok ->
-        case produce_file(
-               queue,
-               job,
-               path,
-               file_number,
-               file_total,
-               opts
-             ) do
-          :ok ->
-            {:cont, :ok}
-
-          {:error, _reason} = error ->
-            {:halt, error}
-        end
+    |> Enum.reduce_while(:ok, fn {path, file_number}, :ok ->
+      case produce_file(queue, job, path, file_number, file_total, opts) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
       end
-    )
+    end)
   end
 
-  defp produce_file(
-         queue,
-         job,
-         path,
-         file_number,
-         file_total,
-         opts
-       ) do
-    part_size =
-      Keyword.get(
-        opts,
-        :part_size,
-        @default_part_size
-      )
+  defp produce_file(queue, job, path, file_number, file_total, opts) do
+    part_size = Keyword.get(opts, :part_size, @default_part_size)
+    encoding = Keyword.get(opts, :encoding, @default_encoding)
+    Logger.info("preparing #{path} [#{file_number}/#{file_total}]")
 
-    encoding =
-      Keyword.get(
-        opts,
-        :encoding,
-        @default_encoding
-      )
+    with {:ok, parts} <- stream_file(path, encoding, part_size) do
+      Enum.reduce_while(parts, :ok, fn part, :ok ->
+        part =
+          part
+          |> Map.merge(%{
+            file_number: file_number,
+            file_total: file_total,
+            offset: part_offset(part, encoding, part_size)
+          })
+          |> put_subject(opts)
 
-    Logger.info(
-      "preparing #{path} " <>
-        "[#{file_number}/#{file_total}]"
-    )
-
-    with {:ok, parts} <-
-           stream_file(
-             path,
-             encoding,
-             part_size
-           ) do
-      Enum.reduce_while(
-        parts,
-        :ok,
-        fn part, :ok ->
-          part =
-            part
-            |> Map.merge(%{
-              file_number: file_number,
-              file_total: file_total,
-              offset: part_offset(part, encoding, part_size)
-            })
-            |> put_subject(
-              opts
-            )
-
-          with :ok <- Geri.Control.await(opts[:control]),
-               {:ok, article} <-
-                 Geri.Article.build(
-                   part,
-                   opts
-                 ),
-               # Record preparation before a possibly blocking queue push;
-               # failure diagnostics must include this part even if push fails.
-               :ok <-
-                 Geri.JobState.prepare_part(
-                   job,
-                   part,
-                   article
-                 ),
-               :ok <-
-                 Geri.Queue.push(
-                   queue,
-                   {part, article}
-                 ) do
-            {:cont, :ok}
-          else
-            {:error, _reason} = error ->
-              {:halt, error}
-          end
+        with :ok <- Geri.Control.await(opts[:control]),
+             {:ok, article} <- Geri.Article.build(part, opts),
+             # Record preparation before a possibly blocking queue push;
+             # failure diagnostics must include this part even if push fails.
+             :ok <- Geri.JobState.prepare_part(job, part, article),
+             :ok <- Geri.Queue.push(queue, {part, article}) do
+          {:cont, :ok}
+        else
+          {:error, _reason} = error -> {:halt, error}
         end
-      )
+      end)
     end
   end
 
   # The role changes queue payloads and result recording, not socket protocol.
   # Waiting workers keep no connection until their first article arrives.
-  defp posting_worker(queue, job, worker, opts, role) do
+  defp posting_worker(queue, job, worker, opts, role, result_recipient) do
     label = if role == :repair, do: "R#{worker}", else: worker
     opts = Keyword.put(opts, :worker, label)
 
     try do
-      case posting_loop(queue, job, nil, worker, opts, role) do
+      case posting_loop(queue, job, nil, worker, opts, role, result_recipient) do
         {:ok, conn} ->
           Geri.NNTP.quit(conn)
           :ok
@@ -439,33 +374,30 @@ defmodule Geri do
     end
   end
 
-  defp posting_loop(queue, job, conn, worker, opts, role) do
+  defp posting_loop(queue, job, conn, worker, opts, role, result_recipient) do
     case Geri.Queue.next(queue) do
       {:ok, queued} ->
         {part, article, item} = posting_item(role, queued)
 
-        case controlled_post(conn, part, article, opts[:worker], opts, role == :posting) do
-          {:ok, conn} ->
-            case record_post(role, job, part, article, item, worker, opts) do
-              :ok ->
-                if notify = opts[:repair_notify], do: send(notify, :repair_item_finished)
-                posting_loop(queue, job, conn, worker, opts, role)
+        {result, conn} =
+          case controlled_post(conn, article, opts[:worker], opts, role == :posting) do
+            {:ok, conn} ->
+              {record_post(role, job, part, article, item, worker, opts), conn}
 
-              {:error, reason} ->
-                Geri.Queue.abort(queue, reason)
-                {:error, reason, conn}
-            end
+            {:error, reason, conn} ->
+              {record_post_failure(role, job, item, article, worker, reason), conn}
+          end
 
-          {:error, reason, conn} ->
-            case record_post_failure(role, job, item, article, worker, reason) do
-              :ok ->
-                if notify = opts[:repair_notify], do: send(notify, :repair_item_finished)
-                posting_loop(queue, job, conn, worker, opts, role)
+        case result do
+          :ok ->
+            # Acknowledgement means JobState recorded the outcome, including
+            # an ordinary repair rejection. Never acknowledge a failed update.
+            if result_recipient, do: send(result_recipient, :repair_item_finished)
+            posting_loop(queue, job, conn, worker, opts, role, result_recipient)
 
-              {:error, reason} ->
-                Geri.Queue.abort(queue, reason)
-                {:error, reason, conn}
-            end
+          {:error, reason} ->
+            Geri.Queue.abort(queue, reason)
+            {:error, reason, conn}
         end
 
       :done ->
@@ -481,7 +413,7 @@ defmodule Geri do
   defp posting_item(:repair, {item, part, article}), do: {part, article, item}
 
   defp record_post(:posting, job, part, article, _item, worker, opts) do
-    groups = opts |> Keyword.fetch!(:newsgroups) |> normalize_groups()
+    groups = Keyword.fetch!(opts, :newsgroups)
 
     case Geri.JobState.complete_part(job, part, article, groups, worker) do
       :ok ->
@@ -515,100 +447,72 @@ defmodule Geri do
     Geri.JobState.repair_failed(job, item, worker, reason)
   end
 
-  defp post_with_recovery(
-         conn,
-         part,
-         article,
-         worker,
-         opts
-       ) do
-    post_opts =
-      Keyword.put(
-        opts,
-        :message_id,
-        article.message_id
-      )
+  defp post_with_recovery(conn, article, worker, opts) do
+    post_opts = Keyword.put(opts, :message_id, article.message_id)
 
-    case Geri.NNTP.post(
-           conn,
-           article.data,
-           post_opts
-         ) do
+    case Geri.NNTP.post(conn, article.data, post_opts) do
       :ok ->
         {:ok, conn}
 
-      {:error,
-       {:transport,
-        :before_article,
-        reason}} ->
+      {:error, {:transport, :before_article, reason}} ->
         Logger.warning(
           "worker #{worker} connection lost before posting " <>
             "#{article.message_id}: " <>
             "#{inspect(reason)}"
         )
 
-        reconnect_and_retry(
-          conn,
-          part,
-          article,
-          worker,
-          opts,
-          false
-        )
+        reconnect_and_retry(conn, article, worker, opts, false)
 
-      {:error,
-       {:transport,
-        :uncertain,
-        reason}} ->
+      {:error, {:transport, :uncertain, reason}} ->
         Logger.warning(
           "worker #{worker} connection lost while posting " <>
             "#{article.message_id}: " <>
             "#{inspect(reason)}"
         )
 
-        reconnect_and_retry(
-          conn,
-          part,
-          article,
-          worker,
-          opts,
-          true
-        )
+        reconnect_and_retry(conn, article, worker, opts, true)
 
       {:error, {:post_rejected, _code, _message} = reason} ->
         case Geri.NNTP.stat(conn, article.message_id, opts) do
           :present ->
-            Logger.info("worker #{worker} confirmed #{article.message_id} already present after posting rejection")
+            Logger.info(
+              "worker #{worker} confirmed #{article.message_id} already present after posting rejection"
+            )
+
             {:ok, conn}
 
           :missing ->
             {:error, reason, conn}
 
           {:error, stat_reason} ->
-            Logger.warning("worker #{worker} could not check #{article.message_id} after posting rejection: #{inspect(stat_reason)}")
+            Logger.warning(
+              "worker #{worker} could not check #{article.message_id} after posting rejection: #{inspect(stat_reason)}"
+            )
+
             conn =
               case stat_reason do
-                {:stat_failed, _code, _message} -> conn
+                {:stat_failed, _code, _message} ->
+                  conn
+
                 _ ->
                   Geri.NNTP.close(conn)
                   nil
               end
+
             {:error, reason, conn}
         end
 
       {:error, reason} ->
-        {:error,
-         reason,
-         conn}
+        {:error, reason, conn}
     end
   end
 
-  defp controlled_post(conn, part, article, worker, opts, preflight) do
+  defp controlled_post(conn, article, worker, opts, preflight) do
     network_step(conn, opts, fn conn ->
       if preflight do
-        upload_part(conn, part, article, worker, opts)
+        upload_part(conn, article, worker, opts)
       else
-        post_with_recovery(conn, part, article, worker, opts)
+        post_with_recovery(conn, article, worker, opts)
       end
     end)
   end
@@ -618,19 +522,26 @@ defmodule Geri do
   # returned value forward, since finishing during pause can close it as well.
   defp network_step(conn, opts, operation) do
     control = opts[:control]
+
     case Geri.Control.checkout(control, conn, opts[:worker]) do
-      {:error, reason} -> {:error, reason, nil}
+      {:error, reason} ->
+        {:error, reason, nil}
+
       {:ok, conn} ->
         # Session setup registers before AUTHINFO. Recheck afterwards (also for
         # reused sockets): cancellation may have arrived during authentication.
-        result = with {:ok, conn} <- ensure_post_connection(conn, opts),
-                      :ok <- Geri.Control.connected(control, conn) do
-          operation.(conn)
-        else
-          {:error, reason} -> {:error, reason, nil}
-        end
+        result =
+          with {:ok, conn} <- ensure_post_connection(conn, opts),
+               :ok <- Geri.Control.connected(control, conn) do
+            operation.(conn)
+          else
+            {:error, reason} -> {:error, reason, nil}
+          end
+
         case result do
-          {:ok, conn} -> {:ok, Geri.Control.checkin(control, conn)}
+          {:ok, conn} ->
+            {:ok, Geri.Control.checkin(control, conn)}
+
           {:error, reason, conn} ->
             conn = Geri.Control.checkin(control, conn)
             {:error, reason, conn}
@@ -641,7 +552,7 @@ defmodule Geri do
   defp ensure_post_connection(nil, opts), do: Geri.Session.connect(opts)
   defp ensure_post_connection(conn, _opts), do: {:ok, conn}
 
-  defp upload_part(conn, part, article, worker, opts) do
+  defp upload_part(conn, article, worker, opts) do
     if Keyword.get(opts, :stat_before_post, false) do
       case Geri.NNTP.stat(conn, article.message_id, opts) do
         :present ->
@@ -649,50 +560,44 @@ defmodule Geri do
           {:ok, conn}
 
         :missing ->
-          post_with_recovery(conn, part, article, worker, opts)
+          post_with_recovery(conn, article, worker, opts)
 
         {:error, {:stat_failed, _code, _message} = reason} ->
-          Logger.warning("worker #{worker} could not check #{article.message_id} before posting: #{inspect(reason)}; attempting POST")
-          post_with_recovery(conn, part, article, worker, opts)
+          Logger.warning(
+            "worker #{worker} could not check #{article.message_id} before posting: #{inspect(reason)}; attempting POST"
+          )
+
+          post_with_recovery(conn, article, worker, opts)
 
         {:error, reason} ->
-          Logger.warning("worker #{worker} lost the STAT response for #{article.message_id}: #{inspect(reason)}; reconnecting")
-          reconnect_and_retry(conn, part, article, worker, opts, true)
+          Logger.warning(
+            "worker #{worker} lost the STAT response for #{article.message_id}: #{inspect(reason)}; reconnecting"
+          )
+
+          reconnect_and_retry(conn, article, worker, opts, true)
       end
     else
-      post_with_recovery(conn, part, article, worker, opts)
+      post_with_recovery(conn, article, worker, opts)
     end
   end
 
   # A transport/framing failure discards the entire response stream. Keep
   # uncertainty across reconnects so a lost final POST reply leads to fresh
   # STAT verification rather than an immediate duplicate POST.
-  defp reconnect_and_retry(
-         old_conn,
-         part,
-         article,
-         worker,
-         opts,
-         uncertain
-       ) do
-    Geri.NNTP.close(
-      old_conn
-    )
+  defp reconnect_and_retry(old_conn, article, worker, opts, uncertain) do
+    Geri.NNTP.close(old_conn)
 
     Geri.Control.checkin(opts[:control], nil)
+
     case reconnect(worker, opts) do
       {:error, reason} -> {:error, reason, nil}
-      {:ok, conn} -> retry_after_reconnect(conn, part, article, worker, opts, uncertain)
+      {:ok, conn} -> retry_after_reconnect(conn, article, worker, opts, uncertain)
     end
   end
 
-  defp retry_after_reconnect(conn, part, article, worker, opts, uncertain) do
+  defp retry_after_reconnect(conn, article, worker, opts, uncertain) do
     if uncertain do
-      case Geri.NNTP.stat(
-             conn,
-             article.message_id,
-             opts
-           ) do
+      case Geri.NNTP.stat(conn, article.message_id, opts) do
         :present ->
           Logger.info(
             "worker #{worker} confirmed " <>
@@ -707,13 +612,7 @@ defmodule Geri do
               "#{article.message_id}"
           )
 
-          post_with_recovery(
-            conn,
-            part,
-            article,
-            worker,
-            opts
-          )
+          post_with_recovery(conn, article, worker, opts)
 
         {:error, {:stat_failed, _code, _message} = reason} ->
           Logger.warning(
@@ -722,45 +621,30 @@ defmodule Geri do
               "#{inspect(reason)}; retrying"
           )
 
-          post_with_recovery(
-            conn,
-            part,
-            article,
-            worker,
-            opts
-          )
+          post_with_recovery(conn, article, worker, opts)
 
         {:error, reason} ->
-          Logger.warning("worker #{worker} lost the verification response for #{article.message_id}: #{inspect(reason)}; reconnecting")
-          reconnect_and_retry(conn, part, article, worker, opts, true)
+          Logger.warning(
+            "worker #{worker} lost the verification response for #{article.message_id}: #{inspect(reason)}; reconnecting"
+          )
+
+          reconnect_and_retry(conn, article, worker, opts, true)
       end
     else
-      post_with_recovery(
-        conn,
-        part,
-        article,
-        worker,
-        opts
-      )
+      post_with_recovery(conn, article, worker, opts)
     end
   end
 
   # Recovery currently retries failed connections without an overall budget;
   # initial connect failures return directly. Keep policy changes separate from
   # session refactoring, and retain the interruptible Control.wait retry delay.
-  defp reconnect(
-         worker,
-         opts
-       ) do
+  defp reconnect(worker, opts) do
     delay =
-      Keyword.get(
-        opts,
-        :reconnect_delay,
-        5_000
-      )
+      Keyword.get(opts, :reconnect_delay, 5_000)
 
     with {:ok, _} <- Geri.Control.checkout(opts[:control], nil, opts[:worker]) do
       Logger.warning("worker #{worker} reconnecting")
+
       case Geri.Session.connect(opts) do
         {:ok, conn} ->
           # Preserve the same post-authentication cancellation check as the
@@ -769,11 +653,15 @@ defmodule Geri do
             :ok ->
               Logger.info("worker #{worker} reconnected")
               {:ok, conn}
-            {:error, reason} -> {:error, reason}
+
+            {:error, reason} ->
+              {:error, reason}
           end
+
         {:error, reason} ->
           Geri.Control.checkin(opts[:control], nil)
           Logger.warning("worker #{worker} reconnect failed: #{inspect(reason)}")
+
           with :ok <- Geri.Control.wait(opts[:control], delay) do
             reconnect(worker, opts)
           end
@@ -781,66 +669,20 @@ defmodule Geri do
     end
   end
 
-  defp normalize_groups(groups)
-       when is_list(groups) do
-    groups
+  defp stream_file(path, :uuencode, part_size) do
+    Geri.Encoder.UUEncode.stream_file(path, part_size)
   end
 
-  defp normalize_groups(groups)
-       when is_binary(groups) do
-    groups
-    |> String.split(
-      ","
-    )
-    |> Enum.map(
-      &String.trim/1
-    )
-    |> Enum.reject(
-      &(&1 == "")
-    )
+  defp stream_file(path, :base64, part_size) do
+    Geri.Encoder.Base64.stream_file(path, part_size)
   end
 
-  defp stream_file(
-         path,
-         :uuencode,
-         part_size
-       ) do
-    Geri.Encoder.UUEncode.stream_file(
-      path,
-      part_size
-    )
+  defp stream_file(path, :yenc, part_size) do
+    Geri.Encoder.YEnc.stream_file(path, part_size)
   end
 
-  defp stream_file(
-         path,
-         :base64,
-         part_size
-       ) do
-    Geri.Encoder.Base64.stream_file(
-      path,
-      part_size
-    )
-  end
-
-  defp stream_file(
-         path,
-         :yenc,
-         part_size
-       ) do
-    Geri.Encoder.YEnc.stream_file(
-      path,
-      part_size
-    )
-  end
-
-  defp stream_file(
-         _path,
-         encoding,
-         _part_size
-       ) do
-    {:error,
-     {:unsupported_encoding,
-      encoding}}
+  defp stream_file(_path, encoding, _part_size) do
+    {:error, {:unsupported_encoding, encoding}}
   end
 
   defp part_offset(%{begin: begin_pos}, :yenc, _part_size)
@@ -876,10 +718,7 @@ defmodule Geri do
       )
 
     prefix =
-      case Keyword.get(
-             opts,
-             :comment
-           ) do
+      case Keyword.get(opts, :comment) do
         nil ->
           ""
 
@@ -914,35 +753,51 @@ defmodule Geri do
   end
 
   # The checker owns the lifetime; file batches share this queue and pool.
+  # Each batch is nonempty and contains missing items from exactly one file.
+  # repair/4, unlike this session protocol, may accept items from several files.
   @doc false
   def repair_session(items, job, repair_opts, article_opts, owner) do
     pool = self()
-    repair_opts = Keyword.put(repair_opts, :repair_notify, true)
-    run_repairs(job, repair_opts, fn queue ->
-      produce_repair_batches(queue, items, article_opts, owner, pool)
-    end)
+
+    run_repairs(
+      job,
+      repair_opts,
+      fn queue ->
+        produce_repair_batches(queue, items, article_opts, owner, pool)
+      end,
+      true
+    )
   end
 
-  defp run_repairs(job, repair_opts, produce) do
+  defp run_repairs(job, repair_opts, produce, acknowledge_repairs? \\ false) do
     connections = Keyword.get(repair_opts, :repair_connections, 2)
 
     with :ok <- validate_connections(connections),
          {:ok, queue} <- Geri.Queue.start_link(connections * 2) do
       if repair_opts[:control], do: Geri.Control.register_queue(repair_opts[:control], queue)
+
       try do
-        run_batch(queue, job, connections, repair_opts, :repair, fn -> produce.(queue) end)
+        run_batch(
+          queue,
+          job,
+          connections,
+          repair_opts,
+          :repair,
+          fn -> produce.(queue) end,
+          acknowledge_repairs?
+        )
       after
         stop_process(queue)
       end
     end
   end
 
-  defp produce_repair_batches(queue, items, article_opts, owner, pool) do
+  defp produce_repair_batches(queue, [first | _] = items, article_opts, owner, pool) do
     with :ok <- produce_repairs(queue, items, article_opts),
          :ok <- await_repair_results(length(items)) do
       # Workers acknowledge only after updating JobState. It is now safe to
       # fold this file's verification results, even while the pool stays open.
-      send(owner, {:repair_finished, pool, hd(items).file_number, self()})
+      send(owner, {:repair_finished, pool, first.file_number, self()})
 
       receive do
         {:repair, items} -> produce_repair_batches(queue, items, article_opts, owner, pool)
@@ -1014,84 +869,48 @@ defmodule Geri do
     end
   end
 
-  defp repair_part(%{encoding: :yenc} = item, binary) do
-    body =
-      Geri.Encoder.YEnc.encode_part(
-        binary,
-        item.filename,
-        item.file_size,
-        item.part,
-        item.part_total,
-        item.begin,
-        item.end,
-        item.pcrc32,
-        item.crc32
-      )
+  # Called only after verify_repair_source succeeds for these immutable bytes.
+  # Reuse the verified hash rather than hashing the same slice a second time.
+  defp repair_part(item, binary) do
+    part =
+      item
+      |> Map.take([:encoding, :filename, :part, :file_number, :file_total, :file_size])
+      |> Map.merge(%{
+        total: item.part_total,
+        source_hash: item.source_hash,
+        source_size: byte_size(binary),
+        subject: item.subject
+      })
 
-    item
-    |> Map.take([
-      :encoding,
-      :filename,
-      :part,
-      :file_number,
-      :file_total,
-      :file_size
-    ])
-    |> Map.merge(%{
-      total: item.part_total,
-      source_hash: :crypto.hash(:sha256, binary),
-      source_size: byte_size(binary),
-      begin: item.begin,
-      end: item.end,
-      pcrc32: item.pcrc32,
-      crc32: item.crc32,
-      subject: item.subject,
-      body: body
-    })
-  end
+    case item.encoding do
+      :yenc ->
+        body =
+          Geri.Encoder.YEnc.encode_part(
+            binary,
+            item.filename,
+            item.file_size,
+            item.part,
+            item.part_total,
+            item.begin,
+            item.end,
+            item.pcrc32,
+            item.crc32
+          )
 
-  defp repair_part(%{encoding: :base64} = item, binary) do
-    item
-    |> Map.take([
-      :encoding,
-      :filename,
-      :part,
-      :file_number,
-      :file_total,
-      :file_size
-    ])
-    |> Map.merge(%{
-      total: item.part_total,
-      source_hash: :crypto.hash(:sha256, binary),
-      source_size: byte_size(binary),
-      subject: item.subject,
-      body: Geri.Encoder.Base64.encode(binary)
-    })
-  end
+        part
+        |> Map.merge(Map.take(item, [:begin, :end, :pcrc32, :crc32]))
+        |> Map.put(:body, body)
 
-  defp repair_part(%{encoding: :uuencode} = item, binary) do
-    item
-    |> Map.take([
-      :encoding,
-      :filename,
-      :part,
-      :file_number,
-      :file_total,
-      :file_size
-    ])
-    |> Map.merge(%{
-      total: item.part_total,
-      source_hash: :crypto.hash(:sha256, binary),
-      source_size: byte_size(binary),
-      subject: item.subject,
-      body:
-        Geri.Encoder.UUEncode.encode_part(
-          binary,
-          item.filename,
-          item.part,
-          item.part_total
+      :base64 ->
+        Map.put(part, :body, Geri.Encoder.Base64.encode(binary))
+
+      :uuencode ->
+        Map.put(
+          part,
+          :body,
+          Geri.Encoder.UUEncode.encode_part(binary, item.filename, item.part, item.part_total)
         )
-    })
+    end
   end
 
   defp verify_repair_source(binary, item) do
@@ -1113,17 +932,13 @@ defmodule Geri do
       nil ->
         {:ok, opts}
 
-      host ->
-        tls = Keyword.get(opts, :check_tls, :implicit)
-        port = Keyword.get(opts, :check_port) || default_port(tls)
+      _host ->
+        check_opts =
+          Geri.Options.check_endpoint(opts)
+          |> Keyword.merge(username: opts[:check_username], password: opts[:check_password])
 
-        check_opts = [
-          host: host,
-          port: port,
-          tls: tls,
-          username: Keyword.get(opts, :check_username),
-          password: Keyword.get(opts, :check_password)
-        ]
+        port = check_opts[:port]
+        tls = check_opts[:tls]
 
         check_opts =
           case Keyword.get(opts, :check_auth_file, Keyword.get(opts, :auth_file)) do
@@ -1154,39 +969,53 @@ defmodule Geri do
         {:ok, opts}
 
       _check_host ->
-        {separate, endpoint} = repair_endpoint(opts)
+        {separate, endpoint} = Geri.Options.repair_endpoint(opts)
         host = endpoint[:host]
         port = endpoint[:port]
         tls = endpoint[:tls]
-        inherit = not separate and
-          is_nil(opts[:repair_username]) and is_nil(opts[:repair_password]) and
-          not Keyword.has_key?(opts, :repair_auth_file)
 
-        repair_opts = [host: host, port: port, tls: tls,
-          username: opts[:repair_username], password: opts[:repair_password]]
-        default_auth_file = if separate, do: opts[:auth_file],
-          else: Keyword.get(opts, :check_auth_file, opts[:auth_file])
-        repair_opts = case Keyword.get(opts, :repair_auth_file, default_auth_file) do
-          nil -> repair_opts
-          auth_file -> Keyword.put(repair_opts, :auth_file, auth_file)
-        end
+        inherit =
+          not separate and
+            is_nil(opts[:repair_username]) and is_nil(opts[:repair_password]) and
+            not Keyword.has_key?(opts, :repair_auth_file)
 
-        result = if inherit do
-          {:ok, [username: opts[:check_username], password: opts[:check_password]]}
-        else
-          Geri.Auth.resolve(repair_opts)
-        end
+        repair_opts = [
+          host: host,
+          port: port,
+          tls: tls,
+          username: opts[:repair_username],
+          password: opts[:repair_password]
+        ]
+
+        default_auth_file =
+          if separate,
+            do: opts[:auth_file],
+            else: Keyword.get(opts, :check_auth_file, opts[:auth_file])
+
+        repair_opts =
+          case Keyword.get(opts, :repair_auth_file, default_auth_file) do
+            nil -> repair_opts
+            auth_file -> Keyword.put(repair_opts, :auth_file, auth_file)
+          end
+
+        result =
+          if inherit do
+            {:ok, [username: opts[:check_username], password: opts[:check_password]]}
+          else
+            Geri.Auth.resolve(repair_opts)
+          end
 
         case result do
           {:ok, resolved} ->
-            {:ok, opts
-              |> Keyword.put(:repair_port, port)
-              |> Keyword.put(:repair_tls, tls)
-              |> Keyword.put(:repair_reader, endpoint[:reader])
-              |> Keyword.put(:repair_tls_verify, endpoint[:tls_verify])
-              |> Keyword.put(:repair_tls_ca_file, endpoint[:tls_ca_file])
-              |> maybe_put(:repair_username, resolved[:username])
-              |> maybe_put(:repair_password, resolved[:password])}
+            {:ok,
+             opts
+             |> Keyword.put(:repair_port, port)
+             |> Keyword.put(:repair_tls, tls)
+             |> Keyword.put(:repair_reader, endpoint[:reader])
+             |> Keyword.put(:repair_tls_verify, endpoint[:tls_verify])
+             |> Keyword.put(:repair_tls_ca_file, endpoint[:tls_ca_file])
+             |> maybe_put(:repair_username, resolved[:username])
+             |> maybe_put(:repair_password, resolved[:password])}
 
           {:error, reason} ->
             {:error, {:repair_auth, reason}}
@@ -1215,70 +1044,30 @@ defmodule Geri do
 
   defp stop_checker(checker), do: stop_process(checker)
 
-  # A different listener or transport is a separate repair endpoint even when
-  # its hostname is inherited. Only ABB inherits B's session defaults and login.
-  defp repair_endpoint(opts) do
-    separate_listener = not is_nil(opts[:repair_host]) or
-      (not is_nil(opts[:repair_port]) and opts[:repair_port] != opts[:check_port])
-    tls = Keyword.get(opts, :repair_tls,
-      if(separate_listener, do: :implicit, else: opts[:check_tls]))
-    port = Keyword.get(opts, :repair_port,
-      if(separate_listener or tls != opts[:check_tls],
-        do: default_port(tls), else: opts[:check_port]))
-    separate = separate_listener or tls != opts[:check_tls]
-
-    defaults = if separate do
-      [reader: false, tls_verify: :peer, tls_ca_file: nil]
-    else
-      [reader: Keyword.get(opts, :check_reader, false),
-       tls_verify: Keyword.get(opts, :check_tls_verify, :peer),
-       tls_ca_file: opts[:check_tls_ca_file]]
-    end
-
-    endpoint = [
-      host: opts[:repair_host] || opts[:check_host],
-      port: port,
-      tls: tls,
-      reader: Keyword.get(opts, :repair_reader, defaults[:reader]),
-      tls_verify: Keyword.get(opts, :repair_tls_verify, defaults[:tls_verify]),
-      tls_ca_file: Keyword.get(opts, :repair_tls_ca_file, defaults[:tls_ca_file])
-    ]
-    {separate, endpoint}
-  end
-
   defp checker_options(opts) do
-    [
-      control: opts[:control],
-      host: Keyword.fetch!(opts, :check_host),
-      port: Keyword.fetch!(opts, :check_port),
-      tls: Keyword.get(opts, :check_tls, :implicit),
-      tls_verify: Keyword.get(opts, :check_tls_verify, :peer),
-      tls_ca_file: Keyword.get(opts, :check_tls_ca_file),
-      username: Keyword.get(opts, :check_username),
-      password: Keyword.get(opts, :check_password),
-      reader: Keyword.get(opts, :check_reader, false),
-      connections: Keyword.get(opts, :check_connections, 2),
-      repair_connections: Keyword.get(opts, :repair_connections, 2),
-      repair_opts: [
-        control: opts[:control],
-        host: opts[:repair_host] || opts[:check_host],
-        port: opts[:repair_port],
-        tls: opts[:repair_tls],
-        tls_verify: opts[:repair_tls_verify],
-        tls_ca_file: opts[:repair_tls_ca_file],
-        username: Keyword.get(opts, :repair_username),
-        password: Keyword.get(opts, :repair_password),
-        reader: opts[:repair_reader],
-        repair_connections: Keyword.get(opts, :repair_connections, 2),
-        reconnect_delay: Keyword.get(opts, :reconnect_delay, 5_000)
-      ],
-      article_opts: opts,
-      reconnect_delay: Keyword.get(opts, :reconnect_delay, 5_000)
-    ]
-  end
+    {_independent, repair} = Geri.Options.repair_endpoint(opts)
+    reconnect_delay = Keyword.get(opts, :reconnect_delay, 5_000)
 
-  defp default_port(:implicit), do: 563
-  defp default_port(_tls), do: 119
+    repair_opts =
+      Keyword.merge(repair,
+        control: opts[:control],
+        username: opts[:repair_username],
+        password: opts[:repair_password],
+        repair_connections: Keyword.get(opts, :repair_connections, 2),
+        reconnect_delay: reconnect_delay
+      )
+
+    Geri.Options.check_endpoint(opts)
+    |> Keyword.merge(
+      control: opts[:control],
+      username: opts[:check_username],
+      password: opts[:check_password],
+      connections: Keyword.get(opts, :check_connections, 2),
+      repair_opts: repair_opts,
+      article_opts: opts,
+      reconnect_delay: reconnect_delay
+    )
+  end
 
   defp maybe_put(opts, _key, nil), do: opts
   defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
