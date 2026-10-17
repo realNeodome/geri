@@ -11,7 +11,9 @@ defmodule Geri.Checker do
   created for the first batch and reused while future checks can produce work.
   An empty queue does not establish that the repair session can be destroyed.
   `finish/1` closes check admission and drains work, including final repair-pool
-  shutdown; outer job cleanup subsequently stops this GenServer.
+  shutdown; outer job cleanup subsequently stops this GenServer. The
+  `repair_status` field is `:idle`, `:repairing`, or `:stopping`; pool existence
+  is tracked separately by `repair_pid`. Control owns pause/cancel state.
 
   Check-worker crashes stop checking and classify unfinished/future checks as
   inconclusive without stopping initial posting. Established missing articles
@@ -83,7 +85,7 @@ defmodule Geri.Checker do
         finish_waiters: [],
         files: %{},
         repairs: [],
-        repairing: false,
+        repair_status: :idle,
         repair_pid: nil,
         repair_producer: nil,
         repair_file: nil,
@@ -207,7 +209,7 @@ defmodule Geri.Checker do
     Logger.info("repair pass completed")
     :ok = Geri.JobState.finish_verification_file(state.job, file_number)
 
-    state = %{state | repairing: false, repair_file: nil, repair_producer: producer}
+    state = %{state | repair_status: :idle, repair_file: nil, repair_producer: producer}
     {:noreply, state |> maybe_start_repair() |> maybe_finish()}
   end
 
@@ -224,7 +226,7 @@ defmodule Geri.Checker do
       :ok -> :ok
     end
 
-    state = %{state | repairing: false, repair_pid: nil, repair_producer: nil, repair_file: nil}
+    state = %{state | repair_status: :idle, repair_pid: nil, repair_producer: nil, repair_file: nil}
     state = state |> record_repair_error(result) |> maybe_start_repair() |> maybe_finish()
     {:noreply, state}
   end
@@ -411,7 +413,8 @@ defmodule Geri.Checker do
     end
   end
 
-  defp maybe_start_repair(%{repairing: true} = state), do: state
+  defp maybe_start_repair(%{repair_status: status} = state)
+       when status in [:repairing, :stopping], do: state
   defp maybe_start_repair(%{repairs: []} = state), do: state
 
   defp maybe_start_repair(state) do
@@ -424,7 +427,7 @@ defmodule Geri.Checker do
 
   # repair_pid owns the session; repair_producer receives later file batches.
   # repair_file names the current batch. Between batches the session can remain
-  # alive with repairing false and no active file or queued articles.
+  # alive with repair_status :idle and no active file or queued articles.
   defp start_repair(state) do
     [items | remaining] = state.repairs
     Logger.info("repairing #{length(items)} missing articles from #{hd(items).filename}")
@@ -444,7 +447,7 @@ defmodule Geri.Checker do
         end)
       end
 
-    %{state | repairing: true, repair_pid: pid, repair_file: hd(items).file_number, repairs: remaining}
+    %{state | repair_status: :repairing, repair_pid: pid, repair_file: hd(items).file_number, repairs: remaining}
   end
 
   defp record_repair_error(state, :ok), do: state
@@ -457,15 +460,15 @@ defmodule Geri.Checker do
         %{state | finish_waiters: []}
 
       not state.accepting and map_size(state.inflight) == 0 and
-         :gb_trees.is_empty(state.queue) and not state.repairing and
+         :gb_trees.is_empty(state.queue) and state.repair_status == :idle and
          state.repairs == [] and map_size(state.files) == 0 ->
         if state.repair_pid do
           # All checks and file batches have finished; no producer can add work.
           # Wait for the pool to drain and close its connections before replying.
           send(state.repair_producer, :finish)
-          # Here repairing means waiting for session shutdown, not an active
-          # file batch. Only repair_pool_finished can complete this final drain.
-          %{state | repairing: true}
+          # Remain stopping until repair_pool_finished confirms the task group
+          # has drained; no new batch or finish reply may bypass that wait.
+          %{state | repair_status: :stopping}
         else
           errors = List.wrap(state.check_error) ++ Enum.reverse(state.repair_errors)
           result = Geri.JobState.result(state.job, errors)

@@ -527,11 +527,23 @@ one acknowledgement per batch item, including recorded per-article repair
 failures. Only then may Checker fold that file's accounting. This prevents a
 late repair result from being rejected as belonging to an already finished file.
 
-Checker's current fields encode several states: `repair_pid` identifies the
-session owner, `repair_producer` becomes available between batches, `repair_file`
-identifies the active file, and `repairing` gates the next batch. `repairing: true`
-also represents the final wait for pool shutdown. It does not always mean an
-article is actively being repaired.
+Checker uses `repair_status` for the repair phase and separate fields for
+resources: `repair_pid` identifies the session owner, `repair_producer` receives
+later batches, and `repair_file` identifies the active file.
+
+| Repair status | Meaning |
+| --- | --- |
+| `:idle` | No active batch; the pool may not exist yet, may wait for later batches, or may already have ended |
+| `:repairing` | A file batch is being prepared/processed and its results are not yet all acknowledged |
+| `:stopping` | Final finish was sent to the producer; wait for the session owner's pool-finished notification |
+
+Starting a batch changes idle to repairing. A completed batch returns to idle;
+a pool failure also clears its resource fields and returns to idle before
+considering another queued batch. Once check admission is closed and all work
+has finished, a live idle pool enters stopping. Only its pool-finished report
+(or detected owner exit) clears that final wait. Both repairing and stopping
+block another batch from starting. Pause/cancellation remain Control state;
+they do not introduce additional repair statuses.
 
 `Checker.finish/1` stops accepting new check items and waits for scheduled
 checks, inflight items, file bookkeeping, pending repair batches, and the active

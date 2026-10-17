@@ -412,7 +412,7 @@ if checker do
     inflight: map_size(cstate.inflight),
     check_error: cstate.check_error,
     idle_workers: MapSet.size(cstate.idle),
-    repairing: cstate.repairing,
+    repair_status: cstate.repair_status,
     queued_repair_batches: length(cstate.repairs),
     repair_errors: cstate.repair_errors
   }
@@ -467,9 +467,19 @@ The coordinator's collections have different keys:
 | `files` | Map from file number to total parts, terminal-part set and missing-item list |
 | `repairs` | List of item lists, one batch per file awaiting repair |
 
-`repair_pid` identifies the persistent repair coordinator; it can remain alive
-between batches even when `repairing` is false. Its worker PIDs are not the
-posting `workers` binding.
+`repair_status` describes the repair phase:
+
+| Value | Meaning |
+| --- | --- |
+| `:idle` | No active file batch; a pool may still be alive waiting for future checks |
+| `:repairing` | A file batch is being prepared/processed or awaiting its last results |
+| `:stopping` | All work is done; waiting for the repair pool to finish shutting down |
+
+`repair_pid` identifies the persistent repair coordinator. Use it to distinguish
+an idle live pool from one that has not been created or has already ended. Its
+worker PIDs are not the posting `workers` binding. `repair_file` is the active
+batch's file number, or nil between batches and during final shutdown. These
+fields do not replace Control's pause/cancellation mode.
 
 A timer can become due while paused, but network work still waits at the
 pause gate. `inflight` includes assigned work whose worker may be waiting

@@ -53,6 +53,7 @@ defmodule Geri.RepairPoolTest do
       check_missing(checker, first)
       assert_receive {:article, ^server_pid}, 2_000
       pool = :sys.get_state(checker).repair_pid
+      assert :sys.get_state(checker).repair_status == :repairing
       [queue] = :sys.get_state(c.control).queues
 
       check_missing(checker, second)
@@ -82,7 +83,7 @@ defmodule Geri.RepairPoolTest do
       check_missing(checker, first)
       assert_receive {:article, ^server_pid}, 2_000
       send(server_pid, {:respond, "240 received\r\n"})
-      wait_until(fn -> not :sys.get_state(checker).repairing end)
+      wait_until(fn -> :sys.get_state(checker).repair_status == :idle end)
       pool = :sys.get_state(checker).repair_pid
       assert Process.alive?(pool)
       assert Geri.JobState.verification(c.job).repaired == 1
@@ -98,6 +99,44 @@ defmodule Geri.RepairPoolTest do
     end)
   end
 
+  test "finish distinguishes stopping the pool from an active repair batch", c do
+    with_checker(c, fn checker, server ->
+      server_pid = server.pid
+      check_missing(checker, hd(c.items))
+      assert_receive {:article, ^server_pid}, 2_000
+      assert :sys.get_state(checker).repair_status == :repairing
+      send(server_pid, {:respond, "240 received\r\n"})
+      wait_until(fn -> :sys.get_state(checker).repair_status == :idle end)
+      pool = :sys.get_state(checker).repair_pid
+
+      # Hold the session owner after its last batch. Its tasks may drain, but
+      # Checker must still await the owner's final pool-finished notification.
+      true = :erlang.suspend_process(pool)
+      finish = Task.async(fn -> Geri.Checker.finish(checker) end)
+
+      try do
+        wait_until(fn -> :sys.get_state(checker).repair_status == :stopping end)
+        state = :sys.get_state(checker)
+        assert state.repair_pid == pool
+        assert state.repair_file == nil
+        assert Task.yield(finish, 20) == nil
+        send(checker, :dispatch)
+        assert :sys.get_state(checker).repair_status == :stopping
+        assert Task.yield(finish, 20) == nil
+      after
+        if Process.alive?(pool), do: :erlang.resume_process(pool)
+      end
+
+      assert :ok = Task.await(finish, 2_000)
+      state = :sys.get_state(checker)
+      assert state.repair_status == :idle
+      assert state.repair_pid == nil
+      assert state.repair_producer == nil
+      assert :ok = Task.await(server, 2_000)
+      wait_until(fn -> not Process.alive?(pool) end)
+    end)
+  end
+
   test "a rejected article completes its batch without blocking later repairs", c do
     with_checker(c, fn checker, server ->
       server_pid = server.pid
@@ -105,7 +144,7 @@ defmodule Geri.RepairPoolTest do
       check_missing(checker, first)
       assert_receive {:article, ^server_pid}, 2_000
       send(server_pid, {:respond, "441 rejected\r\n"})
-      wait_until(fn -> not :sys.get_state(checker).repairing end)
+      wait_until(fn -> :sys.get_state(checker).repair_status == :idle end)
       pool = :sys.get_state(checker).repair_pid
       check_missing(checker, second)
       assert_receive {:article, ^server_pid}, 2_000
@@ -146,7 +185,7 @@ defmodule Geri.RepairPoolTest do
 
         if unquote(phase) == :between_batches do
           send(server_pid, {:respond, "240 received\r\n"})
-          wait_until(fn -> not :sys.get_state(checker).repairing end)
+          wait_until(fn -> :sys.get_state(checker).repair_status == :idle end)
         end
 
         pool = :sys.get_state(checker).repair_pid
@@ -206,7 +245,7 @@ defmodule Geri.RepairPoolTest do
       check_missing(checker, hd(c.items))
       assert_receive {:article, ^server_pid}, 2_000
       send(server_pid, {:respond, "240 received\r\n"})
-      wait_until(fn -> not :sys.get_state(checker).repairing end)
+      wait_until(fn -> :sys.get_state(checker).repair_status == :idle end)
       [queue] = :sys.get_state(c.control).queues
       wait_until(fn -> not :queue.is_empty(:sys.get_state(queue).consumers) end)
       [{worker, _tag}] = :queue.to_list(:sys.get_state(queue).consumers)
@@ -286,6 +325,7 @@ defmodule Geri.RepairPoolTest do
         advance_checks(checker)
         wait_until(fn -> map_size(:sys.get_state(checker).inflight) == 0 end)
         assert :ok = Geri.Checker.finish(checker)
+        assert :sys.get_state(checker).repair_status == :idle
         assert :sys.get_state(checker).repair_pid == nil
         assert :sys.get_state(c.control).queues == []
         assert Geri.JobState.verification(c.job).confirmed == 2
