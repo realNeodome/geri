@@ -132,14 +132,29 @@ defmodule Geri.FailureReportingTest do
     refute File.exists?(nzb <> ".part")
   end
 
-  test "NZB write errors return failure rather than crashing JobState", c do
-    state = :sys.get_state(c.job)
-    File.close(state.nzb.writer.io)
-    Geri.JobState.prepare_part(c.job, c.part, c.article)
-    assert {:error, {:nzb_write_failed, {:error, _}}} =
-             Geri.JobState.complete_part(c.job, c.part, c.article, ["test"], 1)
-    assert Process.alive?(c.job)
-    assert map_size(Geri.JobState.failure_info(c.job).nzb.pending_files) == 1
+  for reason <- [:terminated, :enospc] do
+    test "NZB #{reason} write errors return failure rather than crashing JobState", c do
+      state = :sys.get_state(c.job)
+      File.close(state.nzb.writer.io)
+
+      if unquote(reason) == :enospc do
+        device = spawn(fn -> failing_nzb_device() end)
+        on_exit(fn -> if Process.alive?(device), do: Process.exit(device, :kill) end)
+        :sys.replace_state(c.job, fn state -> put_in(state.nzb.writer.io, device) end)
+      end
+
+      Geri.JobState.prepare_part(c.job, c.part, c.article)
+
+      assert {:error, {:nzb_write_failed, {:error, unquote(reason)}}} =
+               Geri.JobState.complete_part(c.job, c.part, c.article, ["test"], 1)
+
+      assert Process.alive?(c.job)
+      details = Geri.JobState.failure_info(c.job)
+      assert map_size(details.nzb.pending_files) == 1
+      assert details.recovery.completed_files == 0
+      assert details.recovery.files[1].unresolved == %{}
+      assert :ok = Geri.JobState.abort(c.job)
+    end
   end
 
   test "checker finish returns JobState's terminal outcome", c do
@@ -309,6 +324,17 @@ defmodule Geri.FailureReportingTest do
       assert System.monotonic_time(:millisecond) < deadline
       Process.sleep(5)
       wait_for_check(checker, deadline)
+    end
+  end
+
+  defp failing_nzb_device do
+    receive do
+      {:io_request, caller, ref, {:put_chars, :latin1, _data}} ->
+        send(caller, {:io_reply, ref, {:error, :enospc}})
+        failing_nzb_device()
+
+      {:file_request, caller, ref, :close} ->
+        send(caller, {:file_reply, ref, :ok})
     end
   end
 end

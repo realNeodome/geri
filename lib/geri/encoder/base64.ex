@@ -1,6 +1,17 @@
 defmodule Geri.Encoder.Base64 do
+  @moduledoc """
+  Produces lazy Base64 streams of `Geri.Article.part/0` maps.
+
+  Part sizes count source bytes; bodies contain encoded bytes and CRLF framing.
+  Streams can raise source-read/size-change errors during enumeration, after
+  stream_file has returned successfully. Batch ordinals and offsets are assigned
+  later by the upload producer. See `Geri.Article` for common field contracts.
+  """
+
   @line_bytes 57
 
+  @doc "Rounds down to a multiple of 57 source bytes; rejects smaller sizes."
+  @spec normalize_part_size(integer()) :: {:ok, pos_integer()} | {:error, :part_size_too_small}
   def normalize_part_size(size) when size < @line_bytes do
     {:error, :part_size_too_small}
   end
@@ -9,6 +20,7 @@ defmodule Geri.Encoder.Base64 do
     {:ok, div(size, @line_bytes) * @line_bytes}
   end
 
+  @spec encode(binary()) :: binary()
   def encode(binary) when is_binary(binary) do
     binary
     |> chunks(@line_bytes)
@@ -17,6 +29,7 @@ defmodule Geri.Encoder.Base64 do
     end)
   end
 
+  @spec stream_file(binary(), pos_integer()) :: {:ok, Enumerable.t()} | {:error, term()}
   def stream_file(path, part_size) do
     with {:ok, effective_size} <- normalize_part_size(part_size),
          filename = Path.basename(path),

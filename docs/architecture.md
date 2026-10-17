@@ -255,6 +255,30 @@ metadata. It deliberately omits the encoded body and full article. Repair queue
 entries are `{item, rebuilt_part, rebuilt_article}` rather than posting's pair.
 See the IEx guide for abbreviated maps and queue examples.
 
+### Type ownership and phase requirements
+
+Types describe the maps already used by the pipeline; they add no structs,
+conversion layer, runtime validation, or persisted-format guarantee.
+
+| Type | Owner and meaning |
+| --- | --- |
+| `Geri.Article.part/0` | Common encoder/prepared-part shape; encoding-specific and later preparation fields are optional |
+| `Geri.Article.t/0` | Complete pre-dot-stuffed article and unfolded encoded header values |
+| `Geri.Checker.item/0` | Body-free check/repair metadata, including optional scheduler and retained outcome fields |
+| `Geri.Recovery.t/0` | Posting frontier, unresolved prepared references, and retired-file count |
+| `Geri.Verification.t/0`, `counts/0` | Outcome sets, retained unresolved items, and folded/current counters |
+| `Geri.NZB.t/0`, `file_metadata/0`, `segment/0` | Writer, buffered file block, and successful output segment |
+| `Geri.JobState.nzb_state/0` | Ordered file buffer and writer lifetime owned by JobState |
+
+Some requirements depend on the phase rather than the map's general type.
+yEnc initially yields a nil subject; preparation fills it and assigns batch
+ordinals/offset before posting. A buffered NZB file initially has a nil subject;
+it must have part one's subject and every segment before writing. Type specs
+document normal boundary values and returns; existing checks and lifecycle
+ordering continue to enforce these phase requirements. Stream-return specs use
+`Enumerable.t/0`; encoder docs identify their yielded part type, while Source
+streams yield original binary chunks and can raise during enumeration.
+
 ### Source consistency
 
 `Geri.Encoder.Source.stream_file/3` checks each chunk against the initially
@@ -694,10 +718,20 @@ A restart needs a new output path if the final name or temporary name exists.
 Successful publication does not claim power-loss durability: the writer does
 not perform an explicit filesystem sync as a transaction boundary.
 
-Some write failures currently raise from the writer; JobState's
-`nzb_operation/1` translates recognized I/O exceptions into job errors. This is
-an existing error boundary to preserve or deliberately replace, not an invitation
-to rescue arbitrary programming exceptions. A complete NZB must survive a later
+The writer uses `:file.write/2` and returns expected I/O errors directly. Its
+operation tags preserve the existing job-result shapes:
+
+| Operation | Failure envelope |
+| --- | --- |
+| Open/header | `{:error, {:nzb_open_failed, reason}}` (occupied paths have their existing separate tags) |
+| File block | `{:error, {:nzb_write_failed, {:error, reason}}}` |
+| Footer/close/publication | `{:error, {:nzb_finalize_failed, reason}}` |
+
+A failed file-block write leaves cleanup to JobState. Failed finalization closes
+the writer and preserves the first error and remaining temporary output, even
+if a subsequent close also fails. JobState handles these return values without
+rescuing writer exceptions. Invalid serialization metadata remains a programming
+error; there is no blanket rescue. A complete NZB must survive a later
 verification failure because its articles were successfully posted to A.
 
 ## Terminal, Unicode, and inspection

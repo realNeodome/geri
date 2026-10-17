@@ -1,4 +1,15 @@
 defmodule Geri.NZB do
+  @moduledoc """
+  Serializes NZB file blocks and publishes completed output without replacement.
+
+  JobState owns the writer and buffers file metadata. Expected file/device
+  failures return tagged errors here; callers do not need to recognize writer
+  exceptions. Invalid metadata is a programming error and is not rescued.
+  Finalization closes the writer, hard-links the completed temporary file to
+  the final path, then removes the temporary name. Failed publication retains
+  the temporary file and never overwrites an occupied destination.
+  """
+
   require Logger
 
   defstruct [
@@ -7,6 +18,34 @@ defmodule Geri.NZB do
     :temp_path
   ]
 
+  @type t :: %__MODULE__{io: pid(), path: binary(), temp_path: binary()}
+
+  @typedoc "A successful segment: bytes count the complete article before dot stuffing."
+  @type segment :: %{bytes: non_neg_integer(), message_id: binary()}
+
+  @typedoc """
+  Per-file output metadata buffered by JobState. Subject is nil until part one
+  completes; write_file requires that subject and all planned segments exist.
+  Poster/subject contain unfolded MIME-encoded header values; serialization
+  applies XML escaping. Segment Message-IDs have no angle brackets.
+  """
+  @type file_metadata :: %{
+          file_number: pos_integer(),
+          filename: binary(),
+          total_parts: pos_integer(),
+          poster: binary(),
+          date: integer(),
+          subject: binary() | nil,
+          groups_used: MapSet.t(binary()),
+          segments: %{pos_integer() => segment()}
+        }
+
+  @type open_error ::
+          {:nzb_exists, binary()} | {:nzb_temp_exists, binary()} | {:nzb_open_failed, term()}
+  @type write_error :: {:nzb_write_failed, {:error, term()}}
+  @type finalize_error :: {:nzb_finalize_failed, term()}
+
+  @spec open(binary()) :: {:ok, t()} | {:error, open_error()}
   def open(path) do
     temp_path = path <> ".part"
 
@@ -22,13 +61,13 @@ defmodule Geri.NZB do
                [:write, :binary, :exclusive]
              ) do
           {:ok, io} ->
-            try do
-              IO.binwrite(io, header())
-              {:ok, %__MODULE__{io: io, path: path, temp_path: temp_path}}
-            rescue
-              error in ErlangError ->
+            case :file.write(io, header()) do
+              :ok ->
+                {:ok, %__MODULE__{io: io, path: path, temp_path: temp_path}}
+
+              {:error, reason} ->
                 File.close(io)
-                {:error, {:nzb_open_failed, error.original}}
+                {:error, {:nzb_open_failed, reason}}
             end
 
           {:error, :eexist} ->
@@ -40,6 +79,8 @@ defmodule Geri.NZB do
     end
   end
 
+  @doc "Writes one complete file block; failed writes leave the writer for caller cleanup."
+  @spec write_file(t(), file_metadata()) :: :ok | {:error, write_error()}
   def write_file(
         %__MODULE__{} = nzb,
         file
@@ -49,49 +90,43 @@ defmodule Geri.NZB do
         "with #{map_size(file.segments)} segments"
     )
 
-    :ok =
-      IO.binwrite(
-        nzb.io,
-        file_xml(file)
-      )
+    case :file.write(nzb.io, file_xml(file)) do
+      :ok ->
+        Logger.info("NZB recorded file #{file.file_number} \"#{file.filename}\"")
+        :ok
 
-    Logger.info(
-      "NZB recorded file #{file.file_number} " <>
-        "\"#{file.filename}\""
-    )
-
-    :ok
+      {:error, _reason} = error ->
+        # Retain the established file-block error envelope used in job results.
+        {:error, {:nzb_write_failed, error}}
+    end
   end
 
+  @spec finalize(t()) :: :ok | {:error, finalize_error()}
   def finalize(%__MODULE__{} = nzb) do
     Logger.debug("finalizing NZB #{nzb.path}")
 
-    IO.binwrite(nzb.io, "</nzb>\n")
-
-    with :ok <-
-           File.close(nzb.io),
+    with :ok <- :file.write(nzb.io, "</nzb>\n"),
+         :ok <- File.close(nzb.io),
          :ok <-
            File.ln(
              nzb.temp_path,
              nzb.path
            ),
          :ok <-
-           File.rm(
-             nzb.temp_path
-           ) do
+           File.rm(nzb.temp_path) do
       Logger.info("NZB finalized #{nzb.path}")
 
       :ok
     else
       {:error, reason} ->
+        # Close after a footer/close failure too. A second close may fail, but
+        # must not replace the original publication error or remove .part.
+        File.close(nzb.io)
         {:error, {:nzb_finalize_failed, reason}}
     end
-  rescue
-    error in ErlangError ->
-      File.close(nzb.io)
-      {:error, {:nzb_finalize_failed, error.original}}
   end
 
+  @spec abort(t()) :: :ok
   def abort(%__MODULE__{} = nzb) do
     File.close(nzb.io)
 

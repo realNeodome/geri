@@ -1,6 +1,18 @@
 defmodule Geri.Encoder.YEnc do
+  @moduledoc """
+  Produces lazy YEnc streams of `Geri.Article.part/0` maps.
+
+  Part sizes count source bytes; bodies contain encoded bytes and CRLF framing.
+  Streams can raise source-read/size-change errors during enumeration, after
+  stream_file has returned successfully. Batch ordinals and offsets are assigned
+  later by the upload producer. pcrc32 covers this part; crc32 is cumulative
+  through this part and covers the whole file on its final part. See
+  `Geri.Article` for common field contracts.
+  """
+
   @line_length 128
 
+  @spec stream_file(binary(), pos_integer()) :: {:ok, Enumerable.t()} | {:error, term()}
   def stream_file(path, part_size)
       when is_integer(part_size) and part_size > 0 do
     with filename = Path.basename(path),
@@ -78,6 +90,7 @@ defmodule Geri.Encoder.YEnc do
     end
   end
 
+  @spec encode(binary()) :: binary()
   def encode(binary) when is_binary(binary) do
     binary
     |> encode_bytes([], 0)
@@ -85,6 +98,17 @@ defmodule Geri.Encoder.YEnc do
     |> IO.iodata_to_binary()
   end
 
+  @spec encode_part(
+          binary(),
+          binary(),
+          pos_integer(),
+          pos_integer(),
+          pos_integer(),
+          pos_integer(),
+          pos_integer(),
+          Geri.Article.crc32(),
+          Geri.Article.crc32()
+        ) :: binary()
   def encode_part(
         binary,
         filename,

@@ -50,6 +50,52 @@ defmodule Geri.NZBPublicationTest do
     refute File.exists?(writer.path)
   end
 
+  test "file-block write errors return tagged failures and leave cleanup to the caller", c do
+    {:ok, writer} = Geri.NZB.open(c.path)
+    :ok = File.close(writer.io)
+    parent = self()
+    device = spawn_link(fn -> failing_device(parent) end)
+    writer = %{writer | io: device}
+
+    try do
+      assert {:error, {:nzb_write_failed, {:error, :enospc}}} =
+               Geri.NZB.write_file(writer, file_metadata())
+
+      refute_receive {:writer_closed, ^device}, 20
+      assert File.exists?(writer.temp_path)
+      refute File.exists?(writer.path)
+      assert :ok = Geri.NZB.abort(writer)
+      assert_receive {:writer_closed, ^device}
+    after
+      Process.unlink(device)
+      if Process.alive?(device), do: Process.exit(device, :kill)
+    end
+  end
+
+  test "writing a block to a closed writer preserves the nested error shape", c do
+    {:ok, writer} = Geri.NZB.open(c.path)
+    :ok = File.close(writer.io)
+
+    assert {:error, {:nzb_write_failed, {:error, :terminated}}} =
+             Geri.NZB.write_file(writer, file_metadata())
+
+    assert File.exists?(writer.temp_path)
+    refute File.exists?(writer.path)
+  end
+
+  test "invalid file metadata is not disguised as an I/O failure", c do
+    {:ok, writer} = Geri.NZB.open(c.path)
+
+    try do
+      assert_raise KeyError, fn ->
+        # Deliberately violate the input contract without a static-call warning.
+        apply(Geri.NZB, :write_file, [writer, Map.delete(file_metadata(), :poster)])
+      end
+    after
+      Geri.NZB.abort(writer)
+    end
+  end
+
   test "an existing part is never truncated", c do
     part = c.path <> ".part"
     File.write!(part, "unfinished NZB")
@@ -191,6 +237,19 @@ defmodule Geri.NZBPublicationTest do
       {:ok, ".\r\n"} -> :ok
       {:ok, _line} -> receive_article(socket)
     end
+  end
+
+  defp file_metadata do
+    %{
+      file_number: 1,
+      filename: "source.bin",
+      total_parts: 1,
+      poster: "geri@example.com",
+      subject: "source.bin",
+      date: 0,
+      groups_used: MapSet.new(["test"]),
+      segments: %{1 => %{bytes: 100, message_id: "part@example.com"}}
+    }
   end
 
   defp failing_device(parent) do

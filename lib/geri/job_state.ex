@@ -27,6 +27,19 @@ defmodule Geri.JobState do
 
   require Logger
 
+  @typedoc """
+  Owned NZB buffer. Pending file subjects may still be nil; only complete file
+  blocks reach the writer. The writer becomes nil after finalization or abort;
+  a nil nzb state means output was not requested.
+  """
+  @type nzb_state :: %{
+          writer: Geri.NZB.t() | nil,
+          path: binary(),
+          file_total: non_neg_integer(),
+          next_file: pos_integer(),
+          pending_files: %{pos_integer() => Geri.NZB.file_metadata()}
+        }
+
   @activity_limit 64
   @ui_history 3
   @ui_lookahead 3
@@ -45,10 +58,13 @@ defmodule Geri.JobState do
     end
   end
 
+  @spec prepare_part(pid(), Geri.Article.part(), Geri.Article.t()) :: :ok
   def prepare_part(job, part, article) do
     GenServer.call(job, {:prepare_part, part, article}, :infinity)
   end
 
+  @spec complete_part(pid(), Geri.Article.part(), Geri.Article.t(), [binary()], pos_integer()) ::
+          :ok | {:error, term()}
   def complete_part(job, part, article, groups, worker) do
     GenServer.call(job, {:complete_part, part, article, groups, worker}, :infinity)
   end
@@ -61,6 +77,7 @@ defmodule Geri.JobState do
 
   # JobState may be inside complete_part waiting for Checker.enqueue. Checker
   # must report through casts rather than synchronously calling back into it.
+  @spec check_present(pid(), Geri.Checker.item(), pos_integer()) :: :ok
   def check_present(job, item, checker) do
     GenServer.cast(job, {:check_present, item, checker})
   end
@@ -79,10 +96,12 @@ defmodule Geri.JobState do
 
   # Repair workers acknowledge their producer only after this call returns.
   # That cross-process barrier lets Checker safely retire the file later.
+  @spec repair_present(pid(), Geri.Checker.item(), pos_integer()) :: :ok
   def repair_present(job, item, worker) do
     GenServer.call(job, {:repair_present, item, worker}, :infinity)
   end
 
+  @spec repair_failed(pid(), Geri.Checker.item(), pos_integer(), term()) :: :ok
   def repair_failed(job, item, worker, reason) do
     GenServer.call(job, {:repair_failed, item, worker, reason}, :infinity)
   end
@@ -104,7 +123,7 @@ defmodule Geri.JobState do
   @impl true
   def init({upload_key, paths, opts}) do
     with {:ok, total_bytes} <- total_file_size(paths),
-         {:ok, nzb} <- nzb_operation(fn -> open_nzb(opts) end) do
+         {:ok, nzb} <- open_nzb(opts) do
       state = %{
         job: %{
           key: upload_key,
@@ -669,7 +688,7 @@ defmodule Geri.JobState do
         if nzb_file_complete?(file) do
           Logger.debug("NZB file #{file.file_number} complete; flushing")
 
-          case nzb_operation(fn -> Geri.NZB.write_file(state.nzb.writer, file) end) do
+          case Geri.NZB.write_file(state.nzb.writer, file) do
             :ok ->
               nzb = %{
                 state.nzb
@@ -707,7 +726,7 @@ defmodule Geri.JobState do
         {:error, :nzb_incomplete, state}
 
       true ->
-        case nzb_operation(fn -> Geri.NZB.finalize(state.nzb.writer) end) do
+        case Geri.NZB.finalize(state.nzb.writer) do
           :ok ->
             nzb = %{state.nzb | writer: nil}
             {:ok, %{state | nzb: nzb}}
@@ -739,19 +758,7 @@ defmodule Geri.JobState do
     end
   end
 
-  # NZB's writer currently matches :ok on writes. Keep I/O errors in the
-  # upload result rather than letting that match terminate JobState.
-  defp nzb_operation(fun) do
-    fun.()
-  rescue
-    error in MatchError -> {:error, {:nzb_write_failed, error.term}}
-    error in ErlangError ->
-      case error.original do
-        :terminated -> {:error, {:nzb_write_failed, {:error, :terminated}}}
-        _ -> reraise error, __STACKTRACE__
-      end
-  end
-
+  @spec build_nzb_state(Geri.NZB.t() | nil, non_neg_integer()) :: nzb_state() | nil
   defp build_nzb_state(nil, _file_total) do
     nil
   end

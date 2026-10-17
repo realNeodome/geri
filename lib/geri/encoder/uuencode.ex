@@ -1,8 +1,19 @@
 defmodule Geri.Encoder.UUEncode do
   import Bitwise
 
+  @moduledoc """
+  Produces lazy UUEncode streams of `Geri.Article.part/0` maps.
+
+  Part sizes count source bytes; bodies contain encoded bytes and CRLF framing.
+  Streams can raise source-read/size-change errors during enumeration, after
+  stream_file has returned successfully. Batch ordinals and offsets are assigned
+  later by the upload producer. See `Geri.Article` for common field contracts.
+  """
+
   @line_bytes 45
 
+  @doc "Rounds down to a multiple of 45 source bytes; rejects smaller sizes."
+  @spec normalize_part_size(integer()) :: {:ok, pos_integer()} | {:error, :part_size_too_small}
   def normalize_part_size(size) when size < @line_bytes do
     {:error, :part_size_too_small}
   end
@@ -11,12 +22,14 @@ defmodule Geri.Encoder.UUEncode do
     {:ok, div(size, @line_bytes) * @line_bytes}
   end
 
+  @spec encode(binary()) :: binary()
   def encode(binary) when is_binary(binary) do
     binary
     |> chunks(@line_bytes)
     |> Enum.map_join(&encode_line/1)
   end
 
+  @spec encode_part(binary(), binary(), pos_integer(), pos_integer()) :: binary()
   def encode_part(binary, filename, part, total)
       when is_binary(binary) and
              is_binary(filename) and
@@ -39,6 +52,7 @@ defmodule Geri.Encoder.UUEncode do
     prefix <> encode(binary) <> suffix
   end
 
+  @spec stream_file(binary(), pos_integer()) :: {:ok, Enumerable.t()} | {:error, term()}
   def stream_file(path, part_size) do
     with {:ok, effective_size} <- normalize_part_size(part_size),
          filename = Path.basename(path),

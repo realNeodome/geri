@@ -25,6 +25,38 @@ defmodule Geri.Checker do
 
   require Logger
 
+  @type repair_status :: :idle | :repairing | :stopping
+
+  @typedoc """
+  Body-free metadata built by JobState for checking and reconstruction.
+  part_total corresponds to an encoder part's total. offset/source_size count
+  source bytes; yEnc begin/end are one-based inclusive positions. Scheduling
+  adds attempt/errors; verification retention can add outcome/reason.
+  """
+  @type item :: %{
+          required(:file_number) => pos_integer(),
+          required(:file_total) => pos_integer(),
+          required(:file_size) => pos_integer(),
+          required(:filename) => binary(),
+          required(:path) => binary(),
+          required(:encoding) => Geri.Article.encoding(),
+          required(:subject) => binary(),
+          required(:part) => pos_integer(),
+          required(:part_total) => pos_integer(),
+          required(:source_size) => pos_integer(),
+          required(:source_hash) => Geri.Article.source_hash(),
+          required(:offset) => non_neg_integer(),
+          required(:message_id) => Geri.Article.message_id(),
+          optional(:begin) => pos_integer() | nil,
+          optional(:end) => pos_integer() | nil,
+          optional(:pcrc32) => Geri.Article.crc32() | nil,
+          optional(:crc32) => Geri.Article.crc32() | nil,
+          optional(:attempt) => non_neg_integer(),
+          optional(:errors) => non_neg_integer(),
+          optional(:outcome) => :pending | Geri.Verification.outcome(),
+          optional(:reason) => term()
+        }
+
   @default_connections 2
   # Relative waits: nominal missing checks at 30, 90, and 180 seconds from
   # enqueue, plus operation/queue delays. Error retries have a separate counter.
@@ -41,10 +73,12 @@ defmodule Geri.Checker do
     end
   end
 
+  @spec enqueue(pid(), item()) :: :ok | {:error, :checker_closed}
   def enqueue(checker, item) do
     GenServer.call(checker, {:enqueue, item}, :infinity)
   end
 
+  @spec finish(pid()) :: :ok | {:error, term()}
   def finish(checker) do
     GenServer.call(checker, :finish, :infinity)
   end

@@ -9,8 +9,17 @@ defmodule Geri.Encoder.Source.SizeChangedError do
 end
 
 defmodule Geri.Encoder.Source do
+  @moduledoc """
+  Streams source-byte chunks while enforcing the initially observed file size.
+
+  Enumeration can raise File.Error or SizeChangedError. Size checks run on each
+  chunk and at EOF; they do not provide a snapshot or detect every same-size
+  edit. Hashes in encoded parts separately protect later repair reads.
+  """
+
   alias Geri.Encoder.Source.SizeChangedError
 
+  @spec stream_file(Path.t(), pos_integer(), non_neg_integer()) :: Enumerable.t()
   def stream_file(path, part_size, file_size) do
     path
     |> File.stream!(part_size, [])

@@ -1,6 +1,57 @@
 defmodule Geri.Article do
+  @moduledoc """
+  Builds NNTP articles and their deterministic identities from encoded parts.
+
+  Encoders return `part/0` maps. The orchestrator adds file ordinals, offset,
+  and a finalized subject before queueing. Body bytes determine identity along
+  with reconstruction metadata; display truncation never changes these values.
+  `t/0` holds the complete article before dot stuffing, plus unfolded encoded
+  header values used for NZB output.
+  """
+
   defstruct [:message_id, :data, :from, :subject]
 
+  @type encoding :: :yenc | :base64 | :uuencode
+  @typedoc "SHA-256 of source bytes, stored as 32 raw bytes rather than hexadecimal text."
+  @type source_hash :: <<_::256>>
+  @type crc32 :: 0..0xFFFFFFFF
+  @typedoc "Protocol Message-ID including its angle brackets."
+  @type message_id :: binary()
+
+  @typedoc """
+  Encoded part metadata, shared by encoder output and prepared posting items.
+  File and part ordinals start at one; sizes and offset count unencoded bytes.
+  Batch file ordinals and zero-based offset are added during preparation.
+  yEnc positions are one-based inclusive; its subject starts nil and is assigned
+  by the orchestrator. CRC/position fields are encoding-specific.
+  """
+  @type part :: %{
+          required(:encoding) => encoding(),
+          required(:filename) => binary(),
+          required(:file_size) => pos_integer(),
+          required(:part) => pos_integer(),
+          required(:total) => pos_integer(),
+          required(:source_hash) => source_hash(),
+          required(:source_size) => pos_integer(),
+          required(:subject) => binary() | nil,
+          required(:body) => binary(),
+          optional(:file_number) => pos_integer(),
+          optional(:file_total) => pos_integer(),
+          optional(:offset) => non_neg_integer(),
+          optional(:begin) => pos_integer(),
+          optional(:end) => pos_integer(),
+          optional(:pcrc32) => crc32(),
+          optional(:crc32) => crc32()
+        }
+
+  @type t :: %__MODULE__{
+          message_id: message_id(),
+          data: binary(),
+          from: binary(),
+          subject: binary()
+        }
+
+  @spec build(part(), keyword()) :: {:ok, t()} | {:error, term()}
   def build(part, opts) do
     from = Keyword.fetch!(opts, :from)
     newsgroups = Keyword.fetch!(opts, :newsgroups)

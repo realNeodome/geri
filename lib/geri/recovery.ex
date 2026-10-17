@@ -21,10 +21,25 @@ defmodule Geri.Recovery do
   format.
   """
 
+  @type unresolved_part :: %{
+          message_id: Geri.Article.message_id(),
+          source_hash: Geri.Article.source_hash()
+        }
+  @type file_state :: %{
+          file_number: pos_integer(),
+          path: binary(),
+          total_parts: pos_integer() | nil,
+          next_part: pos_integer(),
+          unresolved: %{pos_integer() => unresolved_part()}
+        }
+  @type t :: %{files: %{pos_integer() => file_state()}, completed_files: non_neg_integer()}
+
+  @spec new() :: t()
   def new, do: %{files: %{}, completed_files: 0}
 
   # next_part is one past the highest prepared part, not the lowest unfinished
   # part. Unresolved entries preserve holes while workers finish out of order.
+  @spec prepare_part(t(), Geri.Article.part(), Geri.Article.t(), binary()) :: t()
   def prepare_part(state, part, article, path) do
     file =
       Map.get(state.files, part.file_number, %{
@@ -51,6 +66,11 @@ defmodule Geri.Recovery do
     put_in(state.files[part.file_number], file)
   end
 
+  @spec complete_part(t(), %{
+          required(:file_number) => pos_integer(),
+          required(:part) => pos_integer(),
+          optional(atom()) => term()
+        }) :: t()
   def complete_part(state, part) do
     case Map.fetch(state.files, part.file_number) do
       :error ->
@@ -62,6 +82,7 @@ defmodule Geri.Recovery do
     end
   end
 
+  @spec retire_completed(t()) :: t()
   def retire_completed(state) do
     {completed, pending} =
       Enum.split_with(state.files, fn {_number, file} -> file_complete?(file) end)
@@ -74,6 +95,7 @@ defmodule Geri.Recovery do
   end
 
   # An empty files map alone also describes a job whose producer never ran.
+  @spec complete?(t(), non_neg_integer()) :: boolean()
   def complete?(state, file_total) do
     state.completed_files == file_total and map_size(state.files) == 0
   end

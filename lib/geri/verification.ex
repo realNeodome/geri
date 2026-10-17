@@ -19,8 +19,32 @@ defmodule Geri.Verification do
   folding; this module does not infer completion from a quiet queue.
   """
 
+  @type outcome :: :confirmed | :missing | :repaired | :repair_failed | :inconclusive
+  @type counts :: %{
+          confirmed: non_neg_integer(),
+          missing: non_neg_integer(),
+          repaired: non_neg_integer(),
+          repair_failed: non_neg_integer(),
+          inconclusive: non_neg_integer()
+        }
+  @type file_outcomes :: %{
+          confirmed: MapSet.t(pos_integer()),
+          missing: MapSet.t(pos_integer()),
+          repaired: MapSet.t(pos_integer()),
+          repair_failed: MapSet.t(pos_integer()),
+          inconclusive: MapSet.t(pos_integer())
+        }
+  @type t :: %{
+          totals: counts(),
+          files: %{pos_integer() => file_outcomes()},
+          unresolved: %{{pos_integer(), pos_integer()} => Geri.Checker.item()},
+          frontier: non_neg_integer(),
+          finished: MapSet.t(pos_integer())
+        }
+
   @outcomes [:confirmed, :missing, :repaired, :repair_failed, :inconclusive]
 
+  @spec new() :: t()
   def new do
     %{totals: empty_totals(), files: %{}, unresolved: %{}, frontier: 0, finished: MapSet.new()}
   end
@@ -28,6 +52,7 @@ defmodule Geri.Verification do
   # Reject late events for folded files and duplicates of the same outcome.
   # A pending event must not recreate details after a terminal outcome exists;
   # different terminal kinds can still represent missing -> repaired progress.
+  @spec accepts?(t(), :pending | outcome(), Geri.Checker.item()) :: boolean()
   def accepts?(state, kind, item) do
     file = Map.get_lazy(state.files, item.file_number, &empty_file/0)
 
@@ -40,6 +65,7 @@ defmodule Geri.Verification do
       end
   end
 
+  @spec record(t(), :pending | outcome(), Geri.Checker.item()) :: t()
   def record(state, kind, item) do
     if accepts?(state, kind, item) do
       file = Map.get_lazy(state.files, item.file_number, &empty_file/0)
@@ -64,6 +90,7 @@ defmodule Geri.Verification do
 
   # The checker calls this only after every check and any repair have finished.
   # Retain failures, but replace per-part accounting with upload-wide totals.
+  @spec finish_file(t(), pos_integer()) :: t()
   def finish_file(state, number) do
     if finished?(state, number) do
       state
@@ -83,12 +110,14 @@ defmodule Geri.Verification do
 
   # Totals contain only folded files. Add active-file counts at read time so
   # folding changes retention, not the public numbers visible to the caller.
+  @spec summary(t()) :: counts()
   def summary(state) do
     Enum.reduce(state.files, state.totals, fn {_number, file}, totals ->
       add(totals, counts(file))
     end)
   end
 
+  @spec finished?(t(), pos_integer()) :: boolean()
   def finished?(state, number),
     do: number <= state.frontier or MapSet.member?(state.finished, number)
 
