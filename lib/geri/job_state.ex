@@ -1,4 +1,27 @@
 defmodule Geri.JobState do
+  @moduledoc """
+  Serializes bookkeeping for one upload and owns its optional NZB writer.
+
+  State has separate domains whose completion and retention rules differ:
+
+    * `recovery` records prepared but unresolved posting parts and the producer
+      frontier, then retires fully posted files into a completed-file count.
+    * `verification` retains active-file outcomes and unresolved check/repair
+      details, folding finished files into historical counters.
+    * `nzb` buffers successful segments until complete file blocks can be
+      emitted in input order, independently of verification completion.
+    * `ui` is a bounded display projection; removing a row must not discard
+      recovery, verification, or output information.
+
+  Posting/repair completion calls establish bookkeeping before workers report
+  success. Check results and file-finish notifications are casts because this
+  process can synchronously wait for Checker.enqueue. Preserve that direction
+  to avoid a call cycle. Snapshots omit credentials; raw state does not.
+
+  These maps are internal in-memory state, not a persisted resume format.
+  See `docs/architecture.md` for their data contracts and lifetimes.
+  """
+
   use GenServer
 
   require Logger
@@ -35,6 +58,8 @@ defmodule Geri.JobState do
 
   def set_control(job, control), do: GenServer.call(job, {:set_control, control})
 
+  # JobState may be inside complete_part waiting for Checker.enqueue. Checker
+  # must report through casts rather than synchronously calling back into it.
   def check_present(job, item, checker) do
     GenServer.cast(job, {:check_present, item, checker})
   end
@@ -51,6 +76,8 @@ defmodule Geri.JobState do
     GenServer.cast(job, {:check_inconclusive, item, checker, reason})
   end
 
+  # Repair workers acknowledge their producer only after this call returns.
+  # That cross-process barrier lets Checker safely retire the file later.
   def repair_present(job, item, worker) do
     GenServer.call(job, {:repair_present, item, worker}, :infinity)
   end
@@ -125,6 +152,9 @@ defmodule Geri.JobState do
     {:reply, :ok, state}
   end
 
+  # This callback spans posting bookkeeping, ordered output, and check
+  # admission. A fast checker result can arrive before enqueue returns, but
+  # cannot be handled here until pending accounting is recorded and we return.
   def handle_call({:complete_part, part, article, groups, worker}, _from, state) do
     state =
       state
@@ -198,6 +228,8 @@ defmodule Geri.JobState do
     {:reply, snapshot_state(state), state}
   end
 
+  # Posting completeness must hold even without an NZB. An empty output buffer
+  # or a file no longer visible in the TUI is not proof every input was posted.
   def handle_call(:finalize, _from, state)
       when state.recovery.completed_files != state.job.file_total or
              map_size(state.recovery.files) != 0 do
@@ -291,6 +323,9 @@ defmodule Geri.JobState do
     end)
   end
 
+  # next_part is one past the highest prepared part, not the lowest unfinished
+  # part. The unresolved map preserves holes below that frontier while workers
+  # complete out of order. File/part numbers are one-based.
   defp prepare_recovery_part(state, part, article) do
     file =
       Map.get(state.recovery.files, part.file_number, %{
@@ -409,6 +444,9 @@ defmodule Geri.JobState do
 
   defp maybe_enqueue_check(%{checker: nil}, _part, _article), do: {:ok, nil}
 
+  # Retain reconstruction metadata, not the encoded body or full article.
+  # offset is zero-based; yEnc begin/end are one-based inclusive positions.
+  # part.total becomes part_total in the check/repair item representation.
   defp maybe_enqueue_check(state, part, article) do
     path = Enum.at(state.job.paths, part.file_number - 1)
 
@@ -645,6 +683,8 @@ defmodule Geri.JobState do
         MapSet.put(set, group)
       end)
 
+    # Segment size currently counts the complete article before dot stuffing,
+    # unlike progress counters, which count original source bytes.
     segment = %{
       bytes: byte_size(article.data),
       message_id: strip_message_id(article.message_id)
@@ -691,6 +731,9 @@ defmodule Geri.JobState do
     {:ok, state}
   end
 
+  # A later file can finish first, but XML blocks must retain input order.
+  # Only emitted segment maps are discarded; preceding unfinished files can
+  # therefore keep later complete file metadata buffered.
   defp flush_nzb(state) do
     case Map.get(state.nzb.pending_files, state.nzb.next_file) do
       nil ->

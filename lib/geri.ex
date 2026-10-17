@@ -1,4 +1,24 @@
 defmodule Geri do
+  @moduledoc """
+  Runs a finite NNTP upload and owns its resource scopes.
+
+  `upload/2` validates options and resolves credentials before creating JobState,
+  Control, the posting queue, and optional checking/terminal processes. It waits
+  for initial posting and any checking/repair work before returning its result.
+
+  Posting and repair share task/worker implementation but use separate queues
+  and task groups. Fatal posting failure stops the upload's peers; fatal repair
+  failure stops that repair pool without cancelling unrelated initial posting.
+  Worker processes open connections lazily, so task count is not socket count.
+
+  An upload key supports deterministic article regeneration and preliminary
+  STAT checks. It does not restore persisted job state or append to an old NZB.
+  Recovery, verification accounting, and output state belong to `Geri.JobState`;
+  network admission and registered connections belong to `Geri.Control`.
+
+  See `docs/architecture.md` for the cross-module lifecycle and data contracts.
+  """
+
   require Logger
 
   @default_part_size 700 * 1024
@@ -32,6 +52,8 @@ defmodule Geri do
     end
   end
 
+  # Test for a caller-supplied key before generating one. A newly generated
+  # key identifies this job but should not enable STAT before every first POST.
   defp do_upload(paths, opts) do
     opts = Keyword.put(opts, :stat_before_post, Keyword.has_key?(opts, :upload_key))
 
@@ -85,6 +107,9 @@ defmodule Geri do
     end
   end
 
+  # Each nested scope cleans up only the resources it successfully acquired.
+  # Terminal/checker teardown precedes JobState teardown so they can still
+  # report results or restore console state while the job is alive.
   defp run_job(job, paths, connections, opts) do
     with {:ok, queue} <- Geri.Queue.start_link(connections * 2) do
       control = Keyword.fetch!(opts, :control)
@@ -197,6 +222,8 @@ defmodule Geri do
         finish_production(queue, produce.())
       end)
 
+      # A repair session requests acknowledgements with a flag; only after
+      # creating its producer can workers be given the actual recipient PID.
       opts = if opts[:repair_notify], do: Keyword.put(opts, :repair_notify, producer.pid), else: opts
 
       workers =
@@ -232,6 +259,8 @@ defmodule Geri do
 
   defp await_batch(pending, _control, _role, result) when map_size(pending) == 0, do: result
 
+  # Returned errors and monitor exits share one failure path. Once a result
+  # fails, retain that first cause while collecting the peers' shutdown results.
   defp await_batch(pending, control, role, result) do
     receive do
       {ref, task_result} when is_map_key(pending, ref) ->
@@ -256,6 +285,8 @@ defmodule Geri do
     end
   end
 
+  # Control.cancel also serves fatal-error cleanup. Its mode alone must not
+  # turn this retained posting failure into a user-cancellation result.
   defp stop_batch(pending, control, :posting, error) do
     Geri.Control.cancel(control)
     await_batch(pending, control, :posting, error)
@@ -364,6 +395,8 @@ defmodule Geri do
                    part,
                    opts
                  ),
+               # Record preparation before a possibly blocking queue push;
+               # failure diagnostics must include this part even if push fails.
                :ok <-
                  Geri.JobState.prepare_part(
                    job,
@@ -385,6 +418,8 @@ defmodule Geri do
     end
   end
 
+  # The role changes queue payloads and result recording, not socket protocol.
+  # Waiting workers keep no connection until their first article arrives.
   defp posting_worker(queue, job, worker, opts, role) do
     label = if role == :repair, do: "R#{worker}", else: worker
     opts = Keyword.put(opts, :worker, label)
@@ -578,6 +613,9 @@ defmodule Geri do
     end)
   end
 
+  # Checkout supplies Control's current connection, not necessarily the local
+  # cached value: pause can have closed an idle socket. Always carry checkin's
+  # returned value forward, since finishing during pause can close it as well.
   defp network_step(conn, opts, operation) do
     control = opts[:control]
     case Geri.Control.checkout(control, conn, opts[:worker]) do
@@ -624,6 +662,9 @@ defmodule Geri do
     end
   end
 
+  # A transport/framing failure discards the entire response stream. Keep
+  # uncertainty across reconnects so a lost final POST reply leads to fresh
+  # STAT verification rather than an immediate duplicate POST.
   defp reconnect_and_retry(
          old_conn,
          part,
@@ -702,6 +743,9 @@ defmodule Geri do
     end
   end
 
+  # Recovery currently retries failed connections without an overall budget;
+  # initial connect failures return directly. Keep policy changes separate from
+  # session refactoring, and retain the interruptible Control.wait retry delay.
   defp reconnect(
          worker,
          opts
@@ -733,6 +777,9 @@ defmodule Geri do
     end
   end
 
+  # Register the established socket before authentication so cancellation can
+  # interrupt AUTHINFO. NNTP.connect still owns setup/greeting failures before
+  # returning a connection that can be registered here.
   defp connect(opts) do
     with {:ok, conn} <-
            Geri.NNTP.connect(
@@ -957,6 +1004,9 @@ defmodule Geri do
     end)
   end
 
+  # Reconstruct only the recorded source slices, not a newly planned upload.
+  # Hash and Message-ID checks prevent changed input or divergent encoding from
+  # silently replacing the article the checker originally found missing.
   defp produce_repair_file(queue, [first | _] = items, article_opts) do
     case :file.open(first.path, [:read, :binary, :raw]) do
       {:ok, io} ->

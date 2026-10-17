@@ -1,5 +1,23 @@
 defmodule Geri.Verification do
-  @moduledoc false
+  @moduledoc """
+  Pure verification accounting owned and updated by `Geri.JobState`.
+
+  Active files retain per-outcome part sets for deduplication. `unresolved`
+  retains body-free check/repair metadata keyed by `{file_number, part}`;
+  confirmed or repaired items no longer need that detailed record. Finished
+  file sets are folded into `totals`, while a contiguous frontier and a set of
+  out-of-order finished file numbers reject late events without one historical
+  key per successful article. All file and part numbers are one-based.
+
+  Outcomes describe a lifecycle, not mutually exclusive buckets: a part can
+  first be missing, then repaired or repair-failed. Summary subtracts repaired
+  parts from missing; repairs do not count as confirmations on the check server.
+  Pending metadata is not an additional outcome counter.
+
+  This module has no process, scheduling, or I/O. Its internal map is not a
+  persisted format. The caller must establish that a file is finished before
+  folding; this module does not infer completion from a quiet queue.
+  """
 
   @outcomes [:confirmed, :missing, :repaired, :repair_failed, :inconclusive]
 
@@ -7,6 +25,9 @@ defmodule Geri.Verification do
     %{totals: empty_totals(), files: %{}, unresolved: %{}, frontier: 0, finished: MapSet.new()}
   end
 
+  # Reject late events for folded files and duplicates of the same outcome.
+  # A pending event must not recreate details after a terminal outcome exists;
+  # different terminal kinds can still represent missing -> repaired progress.
   def accepts?(state, kind, item) do
     file = Map.get_lazy(state.files, item.file_number, &empty_file/0)
 
@@ -60,6 +81,8 @@ defmodule Geri.Verification do
     end
   end
 
+  # Totals contain only folded files. Add active-file counts at read time so
+  # folding changes retention, not the public numbers visible to the caller.
   def summary(state) do
     Enum.reduce(state.files, state.totals, fn {_number, file}, totals ->
       add(totals, counts(file))
@@ -69,6 +92,8 @@ defmodule Geri.Verification do
   def finished?(state, number),
     do: number <= state.frontier or MapSet.member?(state.finished, number)
 
+  # Out-of-order finished markers only bridge gaps. Once contiguous, their
+  # individual keys can disappear without allowing late results to revive them.
   defp advance_frontier(state) do
     next = state.frontier + 1
 

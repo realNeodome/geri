@@ -1,9 +1,31 @@
 defmodule Geri.Checker do
+  @moduledoc """
+  Schedules propagation checks and coordinates file-level repair batches.
+
+  The coordinator owns check-worker PIDs, idle/inflight membership, a due-time
+  tree, and per-file terminal-check tracking. Workers open connections lazily.
+  JobState owns outcome accounting; this process decides when a file has no
+  more check work and which terminally missing parts need repair.
+
+  One repair batch runs at a time. A separate repair queue and task pool are
+  created for the first batch and reused while future checks can produce work.
+  An empty queue does not establish that the repair session can be destroyed.
+  `finish/1` closes check admission and drains work, including final repair-pool
+  shutdown; outer job cleanup subsequently stops this GenServer.
+
+  Check-worker crashes stop checking and classify unfinished/future checks as
+  inconclusive without stopping initial posting. Established missing articles
+  may still be repaired. Repair acceptance on C does not trigger a new check
+  on B and must not be described as confirmed propagation there.
+  """
+
   use GenServer
 
   require Logger
 
   @default_connections 2
+  # Relative waits: nominal missing checks at 30, 90, and 180 seconds from
+  # enqueue, plus operation/queue delays. Error retries have a separate counter.
   @check_delays [30_000, 60_000, 90_000]
   @error_retry_delay 10_000
   @error_limit 3
@@ -81,6 +103,8 @@ defmodule Geri.Checker do
       |> Map.put(:attempt, 0)
       |> Map.put(:errors, 0)
 
+    # This tracks terminal checks, not final verification outcomes: a missing
+    # part can still need repair after this per-file check record is discarded.
     file = Map.get(state.files, item.file_number, %{total: item.part_total, terminal: MapSet.new(), missing: []})
 
     state = put_in(state.files[item.file_number], file)
@@ -98,6 +122,8 @@ defmodule Geri.Checker do
     {:reply, {:error, :checker_closed}, state}
   end
 
+  # The posting producer/workers have finished before normal upload shutdown
+  # calls this. Stop accepting items, but keep scheduling already admitted work.
   def handle_call(:finish, from, state) do
     state = %{state | accepting: false, finish_waiters: [from | state.finish_waiters]}
     state = maybe_finish(state)
@@ -174,6 +200,9 @@ defmodule Geri.Checker do
 
   def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
 
+  # The producer sends this only after workers synchronously recorded every
+  # result in JobState and acknowledged it. Queue emptiness alone is too early.
+  # Finishing accounting does not end the pool: another file can still arrive.
   def handle_info({:repair_finished, pid, file_number, producer}, %{repair_pid: pid} = state) do
     Logger.info("repair pass completed")
     :ok = Geri.JobState.finish_verification_file(state.job, file_number)
@@ -228,6 +257,9 @@ defmodule Geri.Checker do
     end)
   end
 
+  # Do not restart workers and risk late results undoing classified outcomes.
+  # Preserve repair state: already confirmed missing items remain repairable,
+  # whereas operation failures alone are not evidence that an article is absent.
   defp stop_checking(state, error) do
     stop_workers(state)
     state = cancel_timer(state)
@@ -299,6 +331,7 @@ defmodule Geri.Checker do
 
   defp schedule(state, item, delay) do
     due = System.monotonic_time(:millisecond) + delay
+    # Distinguish items due in the same millisecond without comparing payloads.
     key = {due, state.sequence}
 
     %{
@@ -356,6 +389,9 @@ defmodule Geri.Checker do
     %{state | timer: nil}
   end
 
+  # Repair waits for all parts of this file to reach a terminal check result.
+  # With no missing parts, result casts followed by the finish cast have one
+  # sender (Checker), preserving order in JobState's mailbox without a call back.
   defp complete_check(state, item, outcome) do
     file = Map.fetch!(state.files, item.file_number)
     terminal = MapSet.put(file.terminal, item.part)
@@ -386,6 +422,9 @@ defmodule Geri.Checker do
     end
   end
 
+  # repair_pid owns the session; repair_producer receives later file batches.
+  # repair_file names the current batch. Between batches the session can remain
+  # alive with repairing false and no active file or queued articles.
   defp start_repair(state) do
     [items | remaining] = state.repairs
     Logger.info("repairing #{length(items)} missing articles from #{hd(items).filename}")
@@ -424,6 +463,8 @@ defmodule Geri.Checker do
           # All checks and file batches have finished; no producer can add work.
           # Wait for the pool to drain and close its connections before replying.
           send(state.repair_producer, :finish)
+          # Here repairing means waiting for session shutdown, not an active
+          # file batch. Only repair_pool_finished can complete this final drain.
           %{state | repairing: true}
         else
           errors = List.wrap(state.check_error) ++ Enum.reverse(state.repair_errors)

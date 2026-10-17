@@ -1,4 +1,23 @@
 defmodule Geri.Control do
+  @moduledoc """
+  Coordinates network admission, pause, and cancellation for one upload.
+
+  Actors are tracked by PID with a current connection, busy flag, monitor, and
+  display label. Checkout marks an actor busy; connected registers its socket;
+  checkin marks it idle and returns the connection it may still reuse. The
+  registry can invalidate a worker's cached connection by closing it on pause.
+  This process coordinates closure; it is not the transport's socket owner.
+
+  Pause blocks new admissions and closes idle connections. Active operations
+  finish before the mode changes from `:pausing` to `:paused`. `await_idle/1`
+  observes registered network actors, not a frozen VM or empty work queues.
+
+  Cancellation aborts registered queues, wakes waiters, and closes remaining
+  registered sockets after a grace period. The orchestrator also uses it to
+  stop peers after posting failure; cancelled mode is not itself the final
+  upload result. Context contains diagnostic bindings, not a durable checkpoint.
+  """
+
   use GenServer
 
   @cancel_timeout 10_000
@@ -12,6 +31,8 @@ defmodule Geri.Control do
   def await(nil), do: :ok
   def await(control), do: GenServer.call(control, :await, :infinity)
   def wait(nil, delay), do: Process.sleep(delay)
+  # A reconnect delay must wake on cancellation and respect a pause at its
+  # end. An unconditional sleep would make shutdown wait for the whole delay.
   def wait(control, delay) do
     receive do
       {:cancelled, ^control} -> {:error, :cancelled}
@@ -59,6 +80,8 @@ defmodule Geri.Control do
 
   def handle_call(:resume, _from, %{mode: :cancelled} = state), do: {:reply, {:error, :cancelled}, state}
   def handle_call(:resume, _from, %{mode: :running} = state), do: {:reply, :ok, state}
+  # Resume can overtake the last busy actor's checkin while still PAUSING.
+  # Changing the mode first prevents that checkin from announcing stale PAUSED.
   def handle_call(:resume, _from, state) do
     activity(state, "Geri resumed")
     state = %{state | mode: :running}
@@ -99,6 +122,8 @@ defmodule Geri.Control do
     end
   end
 
+  # Checkout must precede registration, including when connect overlaps
+  # cancellation. A socket acquired after cancellation must be closed too.
   def handle_call({:connected, conn}, {pid, _}, state) do
     actor = Map.fetch!(state.actors, pid)
     state = put_in(state.actors[pid], %{actor | conn: conn})
@@ -111,6 +136,8 @@ defmodule Geri.Control do
     end
   end
 
+  # The caller can have lost its local socket while Control still tracks it.
+  # During pause/cancel, close either reference before declaring this actor idle.
   def handle_call({:checkin, conn}, {pid, _}, state) do
     actor = Map.fetch!(state.actors, pid)
     conn = if state.mode == :running, do: conn, else: close_actor(state, %{actor | conn: conn || actor.conn})
@@ -143,6 +170,8 @@ defmodule Geri.Control do
   end
 
   defp enter(state, _from, :await), do: {:ok, state}
+  # Only a first checkout trusts supplied_conn. Later checkouts use the
+  # registry, which can hold nil after Control closed an idle connection.
   defp enter(state, {pid, _}, {:checkout, supplied_conn, worker}) do
     actor = Map.get_lazy(state.actors, pid, fn ->
       %{conn: supplied_conn, busy: false, monitor: Process.monitor(pid), worker: worker}
@@ -165,6 +194,8 @@ defmodule Geri.Control do
     nil
   end
 
+  # JobState synchronously queries Control while recording posting results.
+  # Activity must remain a cast to JobState to avoid a call cycle.
   defp activity(state, message, worker \\ nil) do
     if job = state.context[:job], do: Geri.JobState.activity(job, message, worker)
     :ok
@@ -185,6 +216,8 @@ defmodule Geri.Control do
   end
 
   defp idle?(state), do: Enum.all?(state.actors, fn {_pid, actor} -> not actor.busy end)
+  # Actor exit and checkin both pass here. Announce completion once, and only
+  # if a pause is still pending; resume/cancel may have superseded the request.
   defp notify_idle(state) do
     if idle?(state) do
       state =
