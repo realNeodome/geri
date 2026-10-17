@@ -303,6 +303,12 @@ version is followed by the commit hash. Untracked files do not mark a build dirt
 See [versioning instructions](docs/installation.md#versioning) for tagging and
 source archive behavior.
 
+## Development
+
+See the [architecture guide](docs/architecture.md) for process ownership,
+data structures, posting/checking/repair lifecycles, and the invariants to
+preserve when changing the code.
+
 ## Tests
 
 Run the regression tests locally:
