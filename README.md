@@ -181,6 +181,20 @@ geri upload \
   --nzb upload-abc.nzb --no-tui -- ./*.bin
 ```
 
+Repair connections inherit B's settings in ABB unless a corresponding
+`--repair-*` option is explicitly supplied. This includes reader mode, TLS
+verification and the CA file; `--no-repair-reader` overrides `--check-reader`.
+
+A separate repair endpoint can use the same hostname as B with a different
+`--repair-port`; repeating the hostname with `--repair-host` is unnecessary.
+An explicit repair host, a different port, or a different TLS mode selects
+independent connection defaults: implicit TLS, peer verification, the system
+CA store, and no reader-mode request, with explicit repair options taking
+precedence. If the TLS mode changes and no repair port is given, its standard
+port is used (563 for implicit TLS, 119 otherwise). Credentials are resolved
+for the repair endpoint using `--repair-auth-file`, or the general auth file;
+B's resolved credentials and check-specific auth file are not inherited.
+
 In both ABB and ABC uploads, repair workers start when the first repair batch is needed and share one queue
 and pool across files. Connections open only when a worker has an article to
 post and remain available for later batches. The pool closes after verification

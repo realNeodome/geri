@@ -1133,12 +1133,12 @@ defmodule Geri do
       nil ->
         {:ok, opts}
 
-      check_host ->
-        separate = not is_nil(opts[:repair_host])
-        host = opts[:repair_host] || check_host
-        tls = opts[:repair_tls] || if(separate, do: :implicit, else: opts[:check_tls])
-        port = opts[:repair_port] || if(separate, do: default_port(tls), else: opts[:check_port])
-        inherit = not separate and port == opts[:check_port] and
+      _check_host ->
+        {separate, endpoint} = repair_endpoint(opts)
+        host = endpoint[:host]
+        port = endpoint[:port]
+        tls = endpoint[:tls]
+        inherit = not separate and
           is_nil(opts[:repair_username]) and is_nil(opts[:repair_password]) and
           not Keyword.has_key?(opts, :repair_auth_file)
 
@@ -1162,6 +1162,9 @@ defmodule Geri do
             {:ok, opts
               |> Keyword.put(:repair_port, port)
               |> Keyword.put(:repair_tls, tls)
+              |> Keyword.put(:repair_reader, endpoint[:reader])
+              |> Keyword.put(:repair_tls_verify, endpoint[:tls_verify])
+              |> Keyword.put(:repair_tls_ca_file, endpoint[:tls_ca_file])
               |> maybe_put(:repair_username, resolved[:username])
               |> maybe_put(:repair_password, resolved[:password])}
 
@@ -1192,39 +1195,38 @@ defmodule Geri do
 
   defp stop_checker(checker), do: stop_process(checker)
 
+  # A different listener or transport is a separate repair endpoint even when
+  # its hostname is inherited. Only ABB inherits B's session defaults and login.
+  defp repair_endpoint(opts) do
+    separate_listener = not is_nil(opts[:repair_host]) or
+      (not is_nil(opts[:repair_port]) and opts[:repair_port] != opts[:check_port])
+    tls = Keyword.get(opts, :repair_tls,
+      if(separate_listener, do: :implicit, else: opts[:check_tls]))
+    port = Keyword.get(opts, :repair_port,
+      if(separate_listener or tls != opts[:check_tls],
+        do: default_port(tls), else: opts[:check_port]))
+    separate = separate_listener or tls != opts[:check_tls]
+
+    defaults = if separate do
+      [reader: false, tls_verify: :peer, tls_ca_file: nil]
+    else
+      [reader: Keyword.get(opts, :check_reader, false),
+       tls_verify: Keyword.get(opts, :check_tls_verify, :peer),
+       tls_ca_file: opts[:check_tls_ca_file]]
+    end
+
+    endpoint = [
+      host: opts[:repair_host] || opts[:check_host],
+      port: port,
+      tls: tls,
+      reader: Keyword.get(opts, :repair_reader, defaults[:reader]),
+      tls_verify: Keyword.get(opts, :repair_tls_verify, defaults[:tls_verify]),
+      tls_ca_file: Keyword.get(opts, :repair_tls_ca_file, defaults[:tls_ca_file])
+    ]
+    {separate, endpoint}
+  end
+
   defp checker_options(opts) do
-    repair_host = Keyword.get(opts, :repair_host) || Keyword.fetch!(opts, :check_host)
-    repair_tls = Keyword.get(opts, :repair_tls) || Keyword.get(opts, :check_tls, :implicit)
-
-    repair_port =
-      Keyword.get(opts, :repair_port) ||
-        if Keyword.has_key?(opts, :repair_host) do
-          default_port(repair_tls)
-        else
-          Keyword.fetch!(opts, :check_port)
-        end
-
-    repair_reader =
-      if Keyword.has_key?(opts, :repair_host) do
-        Keyword.get(opts, :repair_reader, false)
-      else
-        Keyword.get(opts, :check_reader, false)
-      end
-
-    repair_tls_verify =
-      if Keyword.has_key?(opts, :repair_host) do
-        Keyword.get(opts, :repair_tls_verify, :peer)
-      else
-        Keyword.get(opts, :check_tls_verify, :peer)
-      end
-
-    repair_tls_ca_file =
-      if Keyword.has_key?(opts, :repair_host) do
-        Keyword.get(opts, :repair_tls_ca_file)
-      else
-        Keyword.get(opts, :check_tls_ca_file)
-      end
-
     [
       control: opts[:control],
       host: Keyword.fetch!(opts, :check_host),
@@ -1239,14 +1241,14 @@ defmodule Geri do
       repair_connections: Keyword.get(opts, :repair_connections, 2),
       repair_opts: [
         control: opts[:control],
-        host: repair_host,
-        port: repair_port,
-        tls: repair_tls,
-        tls_verify: repair_tls_verify,
-        tls_ca_file: repair_tls_ca_file,
+        host: opts[:repair_host] || opts[:check_host],
+        port: opts[:repair_port],
+        tls: opts[:repair_tls],
+        tls_verify: opts[:repair_tls_verify],
+        tls_ca_file: opts[:repair_tls_ca_file],
         username: Keyword.get(opts, :repair_username),
         password: Keyword.get(opts, :repair_password),
-        reader: repair_reader,
+        reader: opts[:repair_reader],
         repair_connections: Keyword.get(opts, :repair_connections, 2),
         reconnect_delay: Keyword.get(opts, :reconnect_delay, 5_000)
       ],

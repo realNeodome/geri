@@ -35,6 +35,31 @@ defmodule Geri.AuthRolesTest do
     run_roles(c, :abb_override)
   end
 
+  test "ABB inherits B's reader and TLS settings when repair options are absent", c do
+    run_roles(c, :abb,
+      [check_reader: true, check_tls_verify: :none, check_tls_ca_file: "checking.pem"],
+      [reader: true, tls_verify: :none, tls_ca_file: "checking.pem"])
+  end
+
+  test "ABB honors explicit repair reader and TLS overrides", c do
+    run_roles(c, :abb,
+      [repair_reader: true, repair_tls_verify: :none, repair_tls_ca_file: "repair.pem"],
+      [reader: true, tls_verify: :none, tls_ca_file: "repair.pem"])
+  end
+
+  test "ABB preserves an explicit false and stricter repair verification", c do
+    run_roles(c, :abb,
+      [check_reader: true, check_tls_verify: :none, check_tls_ca_file: "checking.pem",
+       repair_reader: false, repair_tls_verify: :peer, repair_tls_ca_file: "repair.pem"],
+      [reader: false, tls_verify: :peer, tls_ca_file: "repair.pem"])
+  end
+
+  test "a different repair port on B's hostname is an independent C endpoint", c do
+    run_roles(c, :abc_port,
+      [check_reader: true, check_tls_verify: :none, check_tls_ca_file: "checking.pem"],
+      [reader: false, tls_verify: :peer, tls_ca_file: nil])
+  end
+
   test "a check username cannot borrow credentials from another B identity", c do
     path = auth_file(c, "check", "machine b.invalid login other password other-secret")
     assert {:error, {:check_auth, :incomplete_credentials}} = Geri.upload(c.source,
@@ -61,7 +86,10 @@ defmodule Geri.AuthRolesTest do
                repair_host: "c.invalid", repair_username: "c", repair_password: "secret\rPOST"))
   end
 
-  defp run_roles(c, mode) do
+  defp run_roles(c, mode, extra \\ [], expected_repair \\ []) do
+    separate = mode in [:abc, :abc_port]
+    check_reader = Keyword.get(extra, :check_reader, false)
+    repair_reader = Keyword.get(extra, :repair_reader, if(separate, do: false, else: check_reader))
     {a, a_port} = listener()
     {b, b_port} = listener()
     {r, r_port} = listener()
@@ -87,7 +115,7 @@ defmodule Geri.AuthRolesTest do
       post(socket)
     end)
     b_server = Task.async(fn ->
-      socket = accept(b)
+      socket = accept(b, check_reader)
       checker = Task.async(fn ->
         receive do
           {:socket, socket} ->
@@ -101,8 +129,8 @@ defmodule Geri.AuthRolesTest do
       end)
       :ok = :gen_tcp.controlling_process(socket, checker.pid)
       send(checker.pid, {:socket, socket})
-      if mode != :abc do
-        repair = accept(b)
+      if not separate do
+        repair = accept(b, repair_reader)
         if mode == :abb_override do
           authenticate(repair, "b-writer", "b-write-secret")
         else
@@ -112,10 +140,12 @@ defmodule Geri.AuthRolesTest do
       end
       Task.await(checker, 5_000)
     end)
-    r_server = if mode == :abc do
+    r_server = if separate do
       Task.async(fn ->
-        socket = accept(r)
-        authenticate(socket, "c-writer", "c-secret")
+        socket = accept(r, repair_reader)
+        if mode == :abc_port,
+          do: authenticate(socket, "global-c", "wrong-c-source"),
+          else: authenticate(socket, "c-writer", "c-secret")
         post(socket)
       end)
     end
@@ -128,15 +158,25 @@ defmodule Geri.AuthRolesTest do
     opts = case mode do
       :abc -> Keyword.merge(opts, repair_host: "127.0.0.1", repair_port: r_port,
                 repair_tls: :none, repair_auth_file: repairing)
+      :abc_port -> Keyword.merge(opts, repair_port: r_port, repair_tls: :none)
       :abb_override -> Keyword.put(opts, :repair_username, "b-writer")
       :abb -> opts
     end
+    opts = Keyword.merge(opts, extra)
     upload = Task.async(fn -> Geri.upload(c.source, opts) end)
     servers = Enum.reject([a_server, b_server, r_server], &is_nil/1)
 
     try do
       assert_receive {:upload_control, control}, 2_000
       checker = wait_until(fn -> Geri.Control.context(control)[:checker] end)
+      repair_opts = :sys.get_state(checker).opts[:repair_opts]
+      assert repair_opts[:host] == "127.0.0.1"
+      assert repair_opts[:port] == if(separate, do: r_port, else: b_port)
+      assert repair_opts[:tls] == :none
+      for {key, value} <- expected_repair, do: assert(repair_opts[key] == value)
+      snapshot = Geri.JobState.snapshot(Geri.Control.context(control).job)
+      assert Enum.map(snapshot.servers, & &1.port) ==
+               if(separate, do: [a_port, b_port, r_port], else: [a_port, b_port])
       # Advance the propagation schedule while retaining real NNTP exchanges.
       for _ <- 1..3, do: run_next_check(checker)
       assert {:ok, _key} = Task.await(upload, 5_000)
@@ -184,9 +224,13 @@ defmodule Geri.AuthRolesTest do
     {listener, port}
   end
 
-  defp accept(listener) do
+  defp accept(listener, reader \\ false) do
     {:ok, socket} = :gen_tcp.accept(listener, 2_000)
     :ok = :gen_tcp.send(socket, "200 ready\r\n")
+    if reader do
+      assert {:ok, "MODE READER\r\n"} = :gen_tcp.recv(socket, 0, 2_000)
+      :ok = :gen_tcp.send(socket, "200 reader ready\r\n")
+    end
     socket
   end
 
