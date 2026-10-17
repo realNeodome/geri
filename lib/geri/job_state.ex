@@ -4,8 +4,9 @@ defmodule Geri.JobState do
 
   State has separate domains whose completion and retention rules differ:
 
-    * `recovery` records prepared but unresolved posting parts and the producer
-      frontier, then retires fully posted files into a completed-file count.
+    * `recovery` uses pure `Geri.Recovery` transformations to record prepared
+      but unresolved posting parts and the producer frontier, then retire fully
+      posted files into a completed-file count.
     * `verification` retains active-file outcomes and unresolved check/repair
       details, folding finished files into historical counters.
     * `nzb` buffers successful segments until complete file blocks can be
@@ -124,7 +125,7 @@ defmodule Geri.JobState do
         checker: nil,
         control: nil,
         verification: Geri.Verification.new(),
-        recovery: %{files: %{}, completed_files: 0},
+        recovery: Geri.Recovery.new(),
         nzb: build_nzb_state(nzb, length(paths)),
         ui: %{
           active_file: 1,
@@ -144,9 +145,11 @@ defmodule Geri.JobState do
 
   @impl true
   def handle_call({:prepare_part, part, article}, _from, state) do
+    path = Enum.at(state.job.paths, part.file_number - 1)
+
     state =
       state
-      |> prepare_recovery_part(part, article)
+      |> update_in([:recovery], &Geri.Recovery.prepare_part(&1, part, article, path))
       |> prepare_ui_part(part)
 
     {:reply, :ok, state}
@@ -158,15 +161,17 @@ defmodule Geri.JobState do
   def handle_call({:complete_part, part, article, groups, worker}, _from, state) do
     state =
       state
-      |> complete_recovery_part(part)
+      |> update_in([:recovery], &Geri.Recovery.complete_part(&1, part))
       |> complete_ui_part(part, article, worker)
       |> record_nzb_part(part, article, groups)
 
     case flush_nzb(state) do
       {:ok, state} ->
+        # Retire only after output was flushed; a write failure must retain
+        # file records in failure diagnostics.
         state =
           state
-          |> purge_completed_recovery()
+          |> update_in([:recovery], &Geri.Recovery.retire_completed/1)
           |> trim_ui_window()
 
         {result, item} = maybe_enqueue_check(state, part, article)
@@ -230,22 +235,20 @@ defmodule Geri.JobState do
 
   # Posting completeness must hold even without an NZB. An empty output buffer
   # or a file no longer visible in the TUI is not proof every input was posted.
-  def handle_call(:finalize, _from, state)
-      when state.recovery.completed_files != state.job.file_total or
-             map_size(state.recovery.files) != 0 do
-    {:reply, {:error, :upload_incomplete}, state}
-  end
-
   def handle_call(:finalize, _from, state) do
-    case flush_nzb(state) do
-      {:ok, state} ->
-        case finalize_nzb(state) do
-          {:ok, state} -> {:reply, :ok, state}
-          {:error, reason, state} -> {:reply, {:error, reason}, state}
-        end
+    if Geri.Recovery.complete?(state.recovery, state.job.file_total) do
+      case flush_nzb(state) do
+        {:ok, state} ->
+          case finalize_nzb(state) do
+            {:ok, state} -> {:reply, :ok, state}
+            {:error, reason, state} -> {:reply, {:error, reason}, state}
+          end
 
-      {:error, reason, state} ->
-        {:reply, {:error, reason}, state}
+        {:error, reason, state} ->
+          {:reply, {:error, reason}, state}
+      end
+    else
+      {:reply, {:error, :upload_incomplete}, state}
     end
   end
 
@@ -321,64 +324,6 @@ defmodule Geri.JobState do
         {:error, reason} -> {:halt, {:error, {:file_stat_failed, path, reason}}}
       end
     end)
-  end
-
-  # next_part is one past the highest prepared part, not the lowest unfinished
-  # part. The unresolved map preserves holes below that frontier while workers
-  # complete out of order. File/part numbers are one-based.
-  defp prepare_recovery_part(state, part, article) do
-    file =
-      Map.get(state.recovery.files, part.file_number, %{
-        file_number: part.file_number,
-        path: Enum.at(state.job.paths, part.file_number - 1),
-        total_parts: part.total,
-        next_part: 1,
-        unresolved: %{}
-      })
-
-    unresolved =
-      Map.put(file.unresolved, part.part, %{
-        message_id: article.message_id,
-        source_hash: part.source_hash
-      })
-
-    file = %{
-      file
-      | total_parts: part.total,
-        next_part: max(file.next_part, part.part + 1),
-        unresolved: unresolved
-    }
-
-    put_in(state.recovery.files[part.file_number], file)
-  end
-
-  defp complete_recovery_part(state, part) do
-    case Map.fetch(state.recovery.files, part.file_number) do
-      :error ->
-        state
-
-      {:ok, file} ->
-        file = %{file | unresolved: Map.delete(file.unresolved, part.part)}
-        put_in(state.recovery.files[part.file_number], file)
-    end
-  end
-
-  defp recovery_file_complete?(file) do
-    file.total_parts != nil and
-      file.next_part > file.total_parts and
-      map_size(file.unresolved) == 0
-  end
-
-  defp purge_completed_recovery(state) do
-    {completed, pending} =
-      state.recovery.files
-      |> Enum.split_with(fn {_number, file} -> recovery_file_complete?(file) end)
-
-    recovery = %{state.recovery |
-      files: Map.new(pending),
-      completed_files: state.recovery.completed_files + length(completed)
-    }
-    %{state | recovery: recovery}
   end
 
   defp prepare_ui_part(state, part) do

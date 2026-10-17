@@ -92,6 +92,7 @@ All library paths in this table are relative to the repository root.
 | `lib/geri/queue.ex` | Blocking bounded FIFO, orderly close, and abort |
 | `lib/geri/job_state.ex` | Single owner of progress, recovery, verification accounting, NZB buffering, and inspection snapshots |
 | `lib/geri/verification.ex` | Pure verification-accounting transformations; no process or sockets |
+| `lib/geri/recovery.ex` | Pure prepared-part/frontier bookkeeping, posting completion, file retirement, and job-completeness predicate; no process or file I/O |
 | `lib/geri/checker.ex` | Check workers, scheduling/retries, terminal file checks, and persistent repair-session coordination |
 | `lib/geri/control.ex` | Network-operation admission, connection registry, pause/cancel state, and diagnostic context |
 | `lib/geri/nzb.ex` | XML serialization, writer I/O, exclusive creation, and publication |
@@ -387,17 +388,31 @@ state domains are intentionally different representations of the same job.
 
 ### Recovery frontier
 
-`prepare_part/3` records `message_id` and `source_hash` under the part number
+JobState owns the recovery map and delegates its transformations to
+`Geri.Recovery`: `new/0`, `prepare_part/4`, `complete_part/2`,
+`retire_completed/1`, and `complete?/2`. The module receives only recovery state,
+part/article metadata, and a caller-supplied path; it does not inspect the rest
+of JobState or read files. This is a code boundary, not a new process or saved
+state format.
+
+`JobState.prepare_part/3` records `message_id` and `source_hash` under the part number
 and advances `next_part`. Here `next_part` is the next part after the highest
 prepared part, not the lowest unposted part. Unresolved entries below it capture
 holes created by parallel workers. Preparation is sequential; completions can
 arrive in another order.
 
-`complete_part/5` removes a successfully handled posting part from recovery.
+`JobState.complete_part/5` removes a successfully handled posting part from recovery.
 A file is complete when its frontier is beyond `total_parts` and its unresolved
 map is empty. Completed file records are purged and counted. Job finalization
 requires every input file to have completed, even when no NZB was requested.
 UI disappearance or an empty queue is not sufficient evidence.
+
+Completion and retirement remain separate. JobState removes the completed part,
+updates progress/output metadata, and attempts the NZB flush before retiring
+finished recovery files. A write failure therefore retains the existing
+failure-reporting shape, including file records whose unresolved map is already
+empty. `completed_files` counts retired files; it is not the highest completed
+file number or a contiguous prefix like verification's finished-file frontier.
 
 Recovery state is in memory. It is not currently serialized, and a restart does
 not load it. It is also separate from verification's `unresolved` map: an article
@@ -761,7 +776,7 @@ contract.
 | Response grammar and uncertain posting | `nntp_response_test.exs`, `stat_recovery_test.exs`, `upload_duplicates_test.exs` |
 | Task failure and scoped shutdown | `task_failure_test.exs`, `upload_shutdown_test.exs`, `repair_shutdown_test.exs`, `checker_failure_test.exs` |
 | Repair-session reuse and completion | `repair_pool_test.exs`, `verification_test.exs`, `failure_reporting_test.exs` |
-| Output publication and ordering | `nzb_publication_test.exs`, `geri_test.exs`, `failure_reporting_test.exs` |
+| Output publication and ordering | `nzb_publication_test.exs`, `failure_reporting_test.exs` |
 | Pause and terminal behavior | `control_test.exs`, `pause_activity_test.exs`, `pause_tui_test.exs`, `tui_input_test.exs`, `inspection_test.exs` |
 | Display projection and native widths | `ui_window_test.exs`, `tui_unicode_test.exs` |
 | Build/install/version contracts | `version_test.exs`, `release_selection_test.exs`, `installation_test.exs` |
